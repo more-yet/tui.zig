@@ -1,0 +1,45 @@
+pub const Capabilities = @import("terminal/capabilities.zig").Capabilities;
+pub const CapabilityObservations = @import("terminal/capabilities.zig").Observations;
+pub const CapabilityProfile = @import("terminal/capabilities.zig").Profile;
+pub const CapabilitySupport = @import("terminal/capabilities.zig").FeatureSupport;
+pub const ClipboardPolicy = @import("terminal/clipboard.zig").Policy;
+pub const ClipboardResult = @import("terminal/clipboard.zig").Result;
+pub const ClipboardValidationError = @import("terminal/clipboard.zig").ValidationError;
+pub const ColorDepth = @import("terminal/capabilities.zig").ColorDepth;
+pub const Hyperlink = @import("terminal/hyperlink.zig").Hyperlink;
+pub const HyperlinkFallback = @import("terminal/hyperlink.zig").Fallback;
+pub const HyperlinkValidationError = @import("terminal/hyperlink.zig").ValidationError;
+pub const BellPolicy = @import("terminal/notification.zig").BellPolicy;
+pub const BellResult = @import("terminal/notification.zig").BellResult;
+pub const Notification = @import("terminal/notification.zig").Notification;
+pub const NotificationBackend = @import("terminal/notification.zig").Backend;
+pub const NotificationDispatchResult = @import("terminal/notification.zig").DispatchResult;
+pub const NotificationUrgency = @import("terminal/notification.zig").Urgency;
+pub const NotificationValidationError = @import("terminal/notification.zig").ValidationError;
+pub const max_hyperlink_label_bytes = @import("terminal/hyperlink.zig").max_label_bytes;
+pub const max_hyperlink_uri_bytes = @import("terminal/hyperlink.zig").max_uri_bytes;
+pub const max_notification_body_bytes = @import("terminal/notification.zig").max_body_bytes;
+pub const max_notification_title_bytes = @import("terminal/notification.zig").max_title_bytes;
+pub const PrimaryDeviceAttributes = @import("terminal/capabilities.zig").PrimaryDeviceAttributes;
+pub const Rgb16 = @import("terminal/capabilities.zig").Rgb16;
+pub const SecondaryDeviceAttributes = @import("terminal/capabilities.zig").SecondaryDeviceAttributes;
+pub const TextSizing = @import("terminal/capabilities.zig").TextSizing;
+pub const CapabilityNegotiator = @import("terminal/capabilities.zig").Negotiator;
+pub const Session = @import("terminal/posix.zig").Session;
+pub const SessionOptions = @import("terminal/posix.zig").Options;
+pub const querySize = @import("terminal/posix.zig").querySize;
+pub const requiredOsc52OutputBytes = @import("terminal/clipboard.zig").requiredOutputBytes;
+pub const clearClipboard = @import("terminal/clipboard.zig").clear;
+pub const dispatchNotification = @import("terminal/notification.zig").dispatch;
+pub const writeClipboard = @import("terminal/clipboard.zig").write;
+pub const writeBell = @import("terminal/notification.zig").writeBell;
+pub const writeHyperlink = @import("terminal/hyperlink.zig").write;
+
+test {
+    _ = @import("terminal/ansi.zig");
+    _ = @import("terminal/capabilities.zig");
+    _ = @import("terminal/clipboard.zig");
+    _ = @import("terminal/hyperlink.zig");
+    _ = @import("terminal/notification.zig");
+    _ = @import("terminal/posix.zig");
+}

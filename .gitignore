@@ -1,0 +1,21 @@
+.zig-cache/
+zig-out/
+
+# Local configuration and secret material
+.env
+.env.*
+.envrc
+.direnv/
+*.age
+*.jks
+*.kdbx
+*.key
+*.keystore
+*.p12
+*.pem
+*.pfx
+
+# Local editor and operating-system state
+.DS_Store
+.idea/
+.vscode/

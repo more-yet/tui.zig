@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/zig-0.16.0.tar.xz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors \
+            --output "${archive}" \
+            'https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz'
+          printf '%s  %s\n' \
+            '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00' \
+            "${archive}" | sha256sum --check --strict
+          tar --extract --xz --file "${archive}" --directory "${RUNNER_TEMP}"
+          printf '%s\n' "${RUNNER_TEMP}/zig-x86_64-linux-0.16.0" >> "${GITHUB_PATH}"
+
+      - name: Verify toolchain
+        run: test "$(zig version)" = '0.16.0'
+
+      - name: Check formatting
+        run: zig fmt --check --exclude src/text/unicode_17.zig build.zig bench examples src test tools
+
+      - name: Test Debug
+        run: zig build test
+
+      - name: Test ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe
+
+      - name: Test ReleaseFast
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Verify generated Unicode data
+        run: zig build unicode-check
+
+      - name: Cross-compile examples
+        run: |
+          zig build example -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSafe
+          zig build example -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
+          zig build example -Dtarget=x86_64-macos-none -Doptimize=ReleaseSafe
+          zig build example -Dtarget=aarch64-macos-none -Doptimize=ReleaseSafe

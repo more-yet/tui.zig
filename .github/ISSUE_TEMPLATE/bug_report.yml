@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a bug you can reproduce
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Send security reports privately through
+        https://github.com/more-yet/tui.zig/security/advisories/new.
+  - type: input
+    id: version
+    attributes:
+      label: tui.zig version or commit
+      placeholder: Release version or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig version
+      placeholder: 0.16.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and terminal
+      placeholder: Linux or macOS, terminal name and version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Small example
+      description: Share a small program and the commands that show the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Share the useful part and replace private data with clear placeholders.
+      render: text
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report is safe to publish and uses sample data.
+          required: true
