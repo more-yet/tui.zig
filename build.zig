@@ -12,12 +12,28 @@ pub fn build(b: *std.Build) void {
     });
     if (target.result.os.tag == .linux and target.result.abi == .gnu) tui.linkSystemLibrary("util", .{});
 
+    const c_api = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    c_api.addImport("tui", tui);
+    if (target.result.os.tag == .linux and target.result.abi == .gnu) c_api.linkSystemLibrary("util", .{});
     const library = b.addLibrary(.{
         .name = "tui",
-        .root_module = tui,
+        .root_module = c_api,
         .linkage = .static,
     });
+    const shared_library = b.addLibrary(.{
+        .name = "tui",
+        .root_module = c_api,
+        .linkage = .dynamic,
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+    });
     b.installArtifact(library);
+    b.installArtifact(shared_library);
+    b.getInstallStep().dependOn(&b.addInstallHeaderFile(b.path("include/tui.h"), "tui.h").step);
 
     const unit_tests = b.addTest(.{ .root_module = tui });
     const run_unit_tests = b.addRunArtifact(unit_tests);
@@ -71,6 +87,13 @@ pub fn build(b: *std.Build) void {
     const consumer_step = b.step("test-consumer", "Compile an external package consumer");
     consumer_step.dependOn(&consumer_build.step);
 
+    const c_abi_step = b.step("test-c-abi", "Build and run C11 and C++11 ABI consumers");
+    const c_consumer = addCConsumer(b, target, optimize, library, "test/c/main.c", false);
+    const cpp_consumer = addCConsumer(b, target, optimize, library, "test/c/main.cpp", true);
+    c_abi_step.dependOn(&b.addRunArtifact(c_consumer).step);
+    c_abi_step.dependOn(&b.addRunArtifact(cpp_consumer).step);
+    c_abi_step.dependOn(&shared_library.step);
+
     const platform_step = b.step("test-platform", "Run platform tests");
     const subprocess_fixture_module = b.createModule(.{
         .root_source_file = b.path("test/platform/fixtures/pty_child.zig"),
@@ -114,6 +137,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(stress_step);
     test_step.dependOn(platform_step);
     test_step.dependOn(consumer_step);
+    test_step.dependOn(c_abi_step);
 
     const unicode_generator_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode.zig"),
@@ -151,6 +175,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| demo_run.addArgs(args);
     const demo_step = b.step("demo", "Run the invalidation demo");
     demo_step.dependOn(&demo_run.step);
+
+    const kitty_smoke_module = b.createModule(.{
+        .root_source_file = b.path("examples/kitty_image_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kitty_smoke_module.addImport("tui", tui);
+    const kitty_smoke = b.addExecutable(.{
+        .name = "kitty-image-smoke",
+        .root_module = kitty_smoke_module,
+    });
+    const kitty_smoke_run = b.addRunArtifact(kitty_smoke);
+    const kitty_smoke_step = b.step("kitty-image-smoke", "Run the interactive Kitty image smoke test");
+    kitty_smoke_step.dependOn(&kitty_smoke_run.step);
 
     const console_module = b.createModule(.{
         .root_source_file = b.path("examples/process_console.zig"),
@@ -195,6 +233,7 @@ pub fn build(b: *std.Build) void {
 
     const example_step = b.step("example", "Compile examples");
     example_step.dependOn(&demo.step);
+    example_step.dependOn(&kitty_smoke.step);
     example_step.dependOn(&console.step);
     example_step.dependOn(&assistant.step);
 
@@ -228,6 +267,33 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| benchmark_run.addArgs(args);
     const benchmark_step = b.step("bench", "Run the ReleaseFast baseline benchmark");
     benchmark_step.dependOn(&benchmark_run.step);
+}
+
+fn addCConsumer(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    library: *std.Build.Step.Compile,
+    path: []const u8,
+    cpp: bool,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = cpp,
+    });
+    module.addCSourceFile(.{
+        .file = b.path(path),
+        .flags = if (cpp) &.{"-std=c++11"} else &.{"-std=c11"},
+    });
+    module.addIncludePath(b.path("include"));
+    const executable = b.addExecutable(.{
+        .name = if (cpp) "tui-cpp-consumer" else "tui-c-consumer",
+        .root_module = module,
+    });
+    module.linkLibrary(library);
+    return executable;
 }
 
 fn addTuiTest(

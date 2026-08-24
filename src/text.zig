@@ -11,6 +11,8 @@ pub const LineLayout = @import("text/line.zig").Layout;
 pub const LineBreakBoundary = @import("text/line_break.zig").Boundary;
 pub const LineBreakIterator = @import("text/line_break.zig").Iterator;
 pub const LineBreakKind = @import("text/line_break.zig").Kind;
+pub const WordBreakBoundary = @import("text/word_break.zig").Boundary;
+pub const WordBreakIterator = @import("text/word_break.zig").Iterator;
 pub const measureLine = @import("text/line.zig").measure;
 pub const layoutLine = @import("text/line.zig").layout;
 pub const WrapIterator = @import("text/wrap.zig").Iterator;
@@ -21,5 +23,6 @@ test {
     _ = @import("text/grapheme.zig");
     _ = @import("text/line.zig");
     _ = @import("text/line_break.zig");
+    _ = @import("text/word_break.zig");
     _ = @import("text/wrap.zig");
 }

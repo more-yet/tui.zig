@@ -2,6 +2,13 @@ pub const Capabilities = @import("terminal/capabilities.zig").Capabilities;
 pub const CapabilityObservations = @import("terminal/capabilities.zig").Observations;
 pub const CapabilityProfile = @import("terminal/capabilities.zig").Profile;
 pub const CapabilitySupport = @import("terminal/capabilities.zig").FeatureSupport;
+pub const ImageProtocol = @import("terminal/capabilities.zig").ImageProtocol;
+pub const ImageSupport = @import("terminal/capabilities.zig").ImageSupport;
+pub const Image = @import("terminal/image.zig").Image;
+pub const ImagePixelFormat = @import("terminal/image.zig").PixelFormat;
+pub const ImagePlacement = @import("terminal/image.zig").Placement;
+pub const ImageRgb = @import("terminal/image.zig").Rgb;
+pub const ImageValidationError = @import("terminal/image.zig").ValidationError;
 pub const ClipboardPolicy = @import("terminal/clipboard.zig").Policy;
 pub const ClipboardResult = @import("terminal/clipboard.zig").Result;
 pub const ClipboardValidationError = @import("terminal/clipboard.zig").ValidationError;
@@ -34,12 +41,17 @@ pub const dispatchNotification = @import("terminal/notification.zig").dispatch;
 pub const writeClipboard = @import("terminal/clipboard.zig").write;
 pub const writeBell = @import("terminal/notification.zig").writeBell;
 pub const writeHyperlink = @import("terminal/hyperlink.zig").write;
+pub const writeKittyImage = @import("terminal/image.zig").writeKitty;
+pub const clearKittyImages = @import("terminal/image.zig").clearKitty;
+pub const writeIterm2Image = @import("terminal/image.zig").writeIterm2;
+pub const writeSixelImage = @import("terminal/image.zig").writeSixel;
 
 test {
     _ = @import("terminal/ansi.zig");
     _ = @import("terminal/capabilities.zig");
     _ = @import("terminal/clipboard.zig");
     _ = @import("terminal/hyperlink.zig");
+    _ = @import("terminal/image.zig");
     _ = @import("terminal/notification.zig");
     _ = @import("terminal/posix.zig");
 }

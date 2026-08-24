@@ -83,6 +83,28 @@ const Lb = enum(u8) {
     zwj,
 };
 
+const Wb = enum(u8) {
+    other,
+    double_quote,
+    single_quote,
+    hebrew_letter,
+    cr,
+    lf,
+    newline,
+    extend,
+    regional_indicator,
+    format,
+    katakana,
+    a_letter,
+    mid_letter,
+    mid_num,
+    mid_num_let,
+    numeric,
+    extend_num_let,
+    zwj,
+    w_seg_space,
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
@@ -121,6 +143,12 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         .limited(2 * 1024 * 1024),
     );
+    const word_break_data = try cwd.readFileAlloc(
+        io,
+        unicode_dir ++ "WordBreakProperty.txt",
+        allocator,
+        .limited(2 * 1024 * 1024),
+    );
     const category_data = try cwd.readFileAlloc(
         io,
         unicode_dir ++ "DerivedGeneralCategory.txt",
@@ -136,6 +164,7 @@ pub fn main(init: std.process.Init) !void {
     var ambiguous: std.ArrayList(Range) = .empty;
     var halfwidth: std.ArrayList(Range) = .empty;
     var line_break: std.ArrayList(Range) = .empty;
+    var word_break: std.ArrayList(Range) = .empty;
     var combining_category: std.ArrayList(Range) = .empty;
     var initial_punctuation: std.ArrayList(Range) = .empty;
     var final_punctuation: std.ArrayList(Range) = .empty;
@@ -146,6 +175,7 @@ pub fn main(init: std.process.Init) !void {
     try parseEmoji(allocator, emoji_data, &extended_pictographic, &emoji_presentation);
     try parseWidth(allocator, width_data, &wide, &ambiguous, &halfwidth);
     try parseLineBreak(allocator, line_break_data, &line_break);
+    try parseWordBreak(allocator, word_break_data, &word_break);
     try parseGeneralCategories(
         allocator,
         category_data,
@@ -163,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
     sortAndMerge(&ambiguous);
     sortAndMerge(&halfwidth);
     sortAndMerge(&line_break);
+    sortAndMerge(&word_break);
     sortAndMerge(&combining_category);
     sortAndMerge(&initial_punctuation);
     sortAndMerge(&final_punctuation);
@@ -179,6 +210,7 @@ pub fn main(init: std.process.Init) !void {
         ambiguous.items,
         halfwidth.items,
         line_break.items,
+        word_break.items,
         combining_category.items,
         initial_punctuation.items,
         final_punctuation.items,
@@ -327,6 +359,57 @@ fn parseLineBreak(allocator: std.mem.Allocator, data: []const u8, output: *std.A
     }
 }
 
+fn parseWordBreak(allocator: std.mem.Allocator, data: []const u8, output: *std.ArrayList(Range)) !void {
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |raw_line| {
+        const line = content(raw_line);
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, ';');
+        const codepoints = trim(fields.next() orelse continue);
+        const property = trim(fields.next() orelse continue);
+        const value: Wb = if (std.mem.eql(u8, property, "Double_Quote"))
+            .double_quote
+        else if (std.mem.eql(u8, property, "Single_Quote"))
+            .single_quote
+        else if (std.mem.eql(u8, property, "Hebrew_Letter"))
+            .hebrew_letter
+        else if (std.mem.eql(u8, property, "CR"))
+            .cr
+        else if (std.mem.eql(u8, property, "LF"))
+            .lf
+        else if (std.mem.eql(u8, property, "Newline"))
+            .newline
+        else if (std.mem.eql(u8, property, "Extend"))
+            .extend
+        else if (std.mem.eql(u8, property, "Regional_Indicator"))
+            .regional_indicator
+        else if (std.mem.eql(u8, property, "Format"))
+            .format
+        else if (std.mem.eql(u8, property, "Katakana"))
+            .katakana
+        else if (std.mem.eql(u8, property, "ALetter"))
+            .a_letter
+        else if (std.mem.eql(u8, property, "MidLetter"))
+            .mid_letter
+        else if (std.mem.eql(u8, property, "MidNum"))
+            .mid_num
+        else if (std.mem.eql(u8, property, "MidNumLet"))
+            .mid_num_let
+        else if (std.mem.eql(u8, property, "Numeric"))
+            .numeric
+        else if (std.mem.eql(u8, property, "ExtendNumLet"))
+            .extend_num_let
+        else if (std.mem.eql(u8, property, "ZWJ"))
+            .zwj
+        else if (std.mem.eql(u8, property, "WSegSpace"))
+            .w_seg_space
+        else
+            return error.UnknownWordBreakProperty;
+        const range = try parseRange(codepoints);
+        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @intFromEnum(value) });
+    }
+}
+
 fn parseGeneralCategories(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -409,6 +492,7 @@ fn emit(
     ambiguous: []const Range,
     halfwidth: []const Range,
     line_break: []const Range,
+    word_break: []const Range,
     combining_category: []const Range,
     initial_punctuation: []const Range,
     final_punctuation: []const Range,
@@ -457,6 +541,12 @@ fn emit(
         \\    wj, xx, zw, zwj,
         \\};
         \\
+        \\pub const WordBreak = enum(u8) {
+        \\    other, double_quote, single_quote, hebrew_letter, cr, lf, newline,
+        \\    extend, regional_indicator, format, katakana, a_letter, mid_letter,
+        \\    mid_num, mid_num_let, numeric, extend_num_let, zwj, w_seg_space,
+        \\};
+        \\
         \\const PropertyRange = struct { first: u21, last: u21, value: u8 };
         \\const Range = struct { first: u21, last: u21 };
         \\
@@ -471,6 +561,7 @@ fn emit(
     try emitRanges(writer, "ambiguous_ranges", ambiguous);
     try emitRanges(writer, "halfwidth_ranges", halfwidth);
     try emitPropertyRanges(writer, "line_break_ranges", line_break);
+    try emitPropertyRanges(writer, "word_break_ranges", word_break);
     try emitRanges(writer, "combining_category_ranges", combining_category);
     try emitRanges(writer, "initial_punctuation_ranges", initial_punctuation);
     try emitRanges(writer, "final_punctuation_ranges", final_punctuation);
@@ -521,6 +612,10 @@ fn emit(
         \\        (codepoint >= 0x30000 and codepoint <= 0x3FFFD)) return .id;
         \\    if (codepoint >= 0x20A0 and codepoint <= 0x20CF) return .pr;
         \\    return .xx;
+        \\}
+        \\
+        \\pub fn wordBreak(codepoint: u21) WordBreak {
+        \\    return @enumFromInt(lookupProperty(word_break_ranges[0..], codepoint, 0));
         \\}
         \\
         \\pub fn isCombiningCategory(codepoint: u21) bool {

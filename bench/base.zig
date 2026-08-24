@@ -67,16 +67,25 @@ const Scenario = enum {
     line_decode,
     process_output_batch,
     editor_middle_edit,
+    editor_deep_line,
+    editor_history,
+    search_first_match,
     line_break_scan,
+    word_break_scan,
+    image_kitty,
+    image_iterm2,
+    image_sixel,
     app_cycle,
     theme_resolve,
     display_panel,
     display_gauge,
     display_widgets,
+    line_chart,
     form_controls,
     text_input,
     text_input_selection,
     text_area,
+    text_area_full,
     text_area_soft_wrap,
     assistant_cycle,
     scrollback_view,
@@ -147,7 +156,13 @@ pub fn main(init: std.process.Init) !void {
                 .line_decode => try runLineDecodeScenario(init, stdout, iterations),
                 .process_output_batch => try runProcessOutputBatchScenario(init, stdout, iterations),
                 .editor_middle_edit => try runEditorScenario(init, stdout, iterations),
+                .editor_deep_line => try runDeepLineScenario(init, stdout, iterations),
+                .editor_history => try runHistoryScenario(init, stdout, iterations),
+                .search_first_match => try runSearchScenario(init, stdout, iterations),
                 .line_break_scan => try runLineBreakScenario(init, stdout, iterations),
+                .word_break_scan => try runWordBreakScenario(init, stdout, iterations),
+                .image_kitty, .image_iterm2, .image_sixel => try runImageScenario(init, stdout, active, iterations),
+                .line_chart => try runScenario(init, stdout, active, @min(iterations, 5_000)),
                 else => try runScenario(init, stdout, active, iterations),
             },
         };
@@ -249,6 +264,169 @@ fn writeNonRenderResult(
             samples_ps[batch_count - 1],
         },
     );
+}
+
+fn runSearchScenario(init: std.process.Init, stdout: *std.Io.Writer, requested_iterations: usize) !void {
+    const iterations = @min(requested_iterations, 10_000);
+    const Provider = struct {
+        calls: u64 = 0,
+
+        pub fn count(_: *@This()) usize {
+            return 4_096;
+        }
+
+        pub fn text(self: *@This(), index: usize) []const u8 {
+            self.calls += 1;
+            return if (index == 0)
+                "needle appears in the first provider row"
+            else
+                "bounded provider row without the requested token";
+        }
+    };
+    var provider: Provider = .{};
+    var search = tui.editor.Search(Provider){ .provider = &provider };
+    for (0..@min(iterations, 100)) |_| _ = try search.setQuery("needle");
+
+    var samples_ps: [batch_count]u64 = undefined;
+    var checksum: u64 = 0;
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..iterations) |_| {
+            _ = try search.setQuery("needle");
+            const match = search.current orelse unreachable;
+            checksum +%= match.item + match.start + match.end;
+        }
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        if (elapsed <= 0) return error.ClockFailure;
+        const elapsed_ns = std.math.cast(u64, elapsed) orelse return error.ClockFailure;
+        samples_ps[batch] = @intCast((@as(u128, elapsed_ns) * 1_000) / iterations);
+    }
+    std.mem.sort(u64, &samples_ps, {}, std.sort.asc(u64));
+    std.mem.doNotOptimizeAway(provider.calls);
+    std.mem.doNotOptimizeAway(checksum);
+    try writeNonRenderResult(stdout, .search_first_match, iterations, samples_ps);
+}
+
+fn runDeepLineScenario(init: std.process.Init, stdout: *std.Io.Writer, requested_iterations: usize) !void {
+    const iterations = @min(requested_iterations, 10_000);
+    const line = "0123456789abcdef\n";
+    var storage: [line.len * 8_192]u8 = undefined;
+    for (0..8_192) |index| @memcpy(storage[index * line.len ..][0..line.len], line);
+    var model = try tui.editor.Model.init(&storage, &storage);
+    const first_row = model.lineCount() - 20;
+    for (0..@min(iterations, 100)) |iteration| {
+        std.mem.doNotOptimizeAway(model.lineRange(first_row + iteration % 20).?);
+    }
+
+    var samples_ps: [batch_count]u64 = undefined;
+    var checksum: u64 = 0;
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..iterations) |iteration| {
+            const bounds = model.lineRange(first_row + iteration % 20).?;
+            checksum +%= bounds.start + bounds.end;
+        }
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        if (elapsed <= 0) return error.ClockFailure;
+        const elapsed_ns = std.math.cast(u64, elapsed) orelse return error.ClockFailure;
+        samples_ps[batch] = @intCast((@as(u128, elapsed_ns) * 1_000) / iterations);
+    }
+    std.mem.sort(u64, &samples_ps, {}, std.sort.asc(u64));
+    std.mem.doNotOptimizeAway(checksum);
+    try writeNonRenderResult(stdout, .editor_deep_line, iterations, samples_ps);
+}
+
+fn runHistoryScenario(init: std.process.Init, stdout: *std.Io.Writer, iterations: usize) !void {
+    var records: [128]tui.editor.HistoryRecord = undefined;
+    var bytes: [4_096]u8 = undefined;
+    var history = tui.editor.History.init(&records, &bytes, .evict_oldest);
+    var checksum: u64 = 0;
+    for (0..records.len) |index| historyIteration(&history, index, &checksum);
+
+    var samples_ps: [batch_count]u64 = undefined;
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..iterations) |index| historyIteration(&history, index, &checksum);
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        if (elapsed <= 0) return error.ClockFailure;
+        const elapsed_ns = std.math.cast(u64, elapsed) orelse return error.ClockFailure;
+        samples_ps[batch] = @intCast((@as(u128, elapsed_ns) * 1_000) / iterations);
+    }
+    std.mem.sort(u64, &samples_ps, {}, std.sort.asc(u64));
+    std.mem.doNotOptimizeAway(checksum);
+    try writeNonRenderResult(stdout, .editor_history, iterations, samples_ps);
+}
+
+fn historyIteration(history: *tui.editor.History, index: usize, checksum: *u64) void {
+    const inserted = if (index & 1 == 0) "a" else "b";
+    const record = history.record(index, "", inserted, .{ .cursor = index, .anchor = null }) catch unreachable;
+    history.finish(record, .{ .cursor = index + 1, .anchor = null });
+    const current = history.peekUndo().?;
+    checksum.* +%= current.start + current.inserted[0] + current.transaction;
+}
+
+fn runImageScenario(
+    init: std.process.Init,
+    stdout: *std.Io.Writer,
+    comptime scenario: Scenario,
+    requested_iterations: usize,
+) !void {
+    const iterations = @min(requested_iterations, switch (scenario) {
+        .image_kitty => 10_000,
+        .image_iterm2 => 2_000,
+        .image_sixel => 1_000,
+        else => unreachable,
+    });
+    const width = 64;
+    const height = 36;
+    var pixels: [width * height * 4]u8 = undefined;
+    for (&pixels, 0..) |*byte, index| byte.* = @truncate(index *% 73 +% index / 11);
+    const image = tui.terminal.Image{
+        .pixels = &pixels,
+        .width = width,
+        .height = height,
+        .format = .rgba8,
+    };
+    const placement = tui.terminal.ImagePlacement{
+        .columns = 32,
+        .rows = 12,
+        .image_id = 7,
+    };
+    var output_buffer: [4096]u8 = undefined;
+    var output = std.Io.Writer.Discarding.init(&output_buffer);
+    for (0..@min(iterations, 20)) |_| try encodeImage(scenario, &output.writer, image, placement);
+
+    const bytes_before = output.fullCount();
+    var samples_ps: [batch_count]u64 = undefined;
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..iterations) |_| try encodeImage(scenario, &output.writer, image, placement);
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        if (elapsed <= 0) return error.ClockFailure;
+        const elapsed_ns = std.math.cast(u64, elapsed) orelse return error.ClockFailure;
+        samples_ps[batch] = @intCast((@as(u128, elapsed_ns) * 1_000) / iterations);
+    }
+    std.mem.sort(u64, &samples_ps, {}, std.sort.asc(u64));
+    std.mem.doNotOptimizeAway(output.fullCount() - bytes_before);
+    try writeNonRenderResult(stdout, scenario, iterations, samples_ps);
+}
+
+inline fn encodeImage(
+    comptime scenario: Scenario,
+    writer: *std.Io.Writer,
+    image: tui.terminal.Image,
+    placement: tui.terminal.ImagePlacement,
+) !void {
+    switch (scenario) {
+        .image_kitty => try tui.terminal.writeKittyImage(writer, image, placement),
+        .image_iterm2 => try tui.terminal.writeIterm2Image(writer, image, placement),
+        .image_sixel => try tui.terminal.writeSixelImage(writer, image, .{ .red = 15, .green = 23, .blue = 42 }),
+        else => unreachable,
+    }
 }
 
 fn runRuntimeTimerScenario(init: std.process.Init, stdout: *std.Io.Writer, iterations: usize) !void {
@@ -791,6 +969,34 @@ fn lineBreakIteration(text: []const u8) !u64 {
     return checksum;
 }
 
+fn runWordBreakScenario(init: std.process.Init, stdout: *std.Io.Writer, iterations: usize) !void {
+    const text = "can't stop 3.1415 or build_17 " ++
+        "\xE4\xB8\x96\xE7\x95\x8C e\xCC\x81 " ++
+        "\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8\xF0\x9F\x87\xA8\xF0\x9F\x87\xA6";
+    var checksum: u64 = 0;
+    for (0..@min(iterations, 1_000)) |_| checksum +%= try wordBreakIteration(text);
+    var samples_ps: [batch_count]u64 = undefined;
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..iterations) |_| checksum +%= try wordBreakIteration(text);
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+        if (elapsed <= 0) return error.ClockFailure;
+        const elapsed_ns = std.math.cast(u64, elapsed) orelse return error.ClockFailure;
+        samples_ps[batch] = @intCast((@as(u128, elapsed_ns) * 1_000) / iterations);
+    }
+    std.mem.sort(u64, &samples_ps, {}, std.sort.asc(u64));
+    std.mem.doNotOptimizeAway(checksum);
+    try writeNonRenderResult(stdout, .word_break_scan, iterations, samples_ps);
+}
+
+fn wordBreakIteration(text: []const u8) !u64 {
+    var iterator = try tui.text.WordBreakIterator.init(text);
+    var checksum: u64 = 0;
+    while (iterator.next()) |boundary| checksum +%= boundary.offset;
+    return checksum;
+}
+
 fn runCommandScenario(init: std.process.Init, stdout: *std.Io.Writer, iterations: usize) !void {
     var bindings: [64]tui.command.Binding = undefined;
     var strokes: [128]tui.command.Stroke = undefined;
@@ -898,10 +1104,14 @@ fn runScenario(
     var text_area_storage: [2048]u8 = undefined;
     var text_area_model = try tui.editor.Model.init(&text_area_storage, text_area_initial);
     var text_area = tui.widget.TextArea{ .model = &text_area_model, .focused = true };
+    if (scenario == .text_area or scenario == .text_area_full) {
+        _ = text_area.layout(.{ .width = 64, .height = 20 });
+        if (scenario == .text_area) text_area_model.viewport.top_row = text_area_model.lineCount() - 1;
+    }
     if (scenario == .text_input_selection) _ = try text_input.setSelection(6, 8);
     if (scenario == .text_area_soft_wrap) {
         _ = text_area_model.setSoftWrap(true);
-        _ = text_area_model.setViewportSize(24, 20);
+        _ = text_area.layout(.{ .width = 24, .height = 20 });
         _ = try text_area_model.setCursor(0);
         if (text_area.handle(.{ .key = .{ .code = .end, .modifiers = .{ .shift = true } } }) != .redraw) unreachable;
     }
@@ -910,6 +1120,7 @@ fn runScenario(
     var assistant_prompt_storage: [128]u8 = undefined;
     var assistant_prompt = try tui.editor.Model.init(&assistant_prompt_storage, "");
     var assistant = try assistant_demo.AssistantApp.init(&assistant_ring, &assistant_prompt);
+    if (scenario == .assistant_cycle) assistant.layout(.{ .width = 80, .height = 24 });
     var data_state: BenchmarkDataState = .{};
 
     const warmup_iterations = @min(iterations, 1_000);
@@ -1070,6 +1281,27 @@ fn renderIteration(
             };
             try gauge.draw(&surface);
         },
+        .line_chart => {
+            const Provider = struct {
+                phase: usize,
+
+                pub fn count(_: *@This()) usize {
+                    return 256;
+                }
+
+                pub fn sample(self: *@This(), index: usize) f64 {
+                    const position = (index + self.phase) % 64;
+                    return @floatFromInt(if (position < 32) position else 63 - position);
+                }
+            };
+            var masks: [40 * 12]u8 = undefined;
+            var canvas = try tui.render.BrailleCanvas.init(&masks, .{ .width = 40, .height = 12 });
+            var provider = Provider{ .phase = iteration };
+            var chart = tui.widget.LineChart(Provider){ .provider = &provider, .canvas = &canvas };
+            var frame = renderer.frame();
+            var surface = frame.surface(.{ .x = 4, .y = 2, .width = 40, .height = 12 });
+            try chart.draw(&surface);
+        },
         .form_controls => {
             const activate = tui.input.Event{ .key = .{ .code = .enter } };
             if (form_state.button.handle(activate) != .handled or !form_state.button.takeActivation()) unreachable;
@@ -1105,7 +1337,7 @@ fn renderIteration(
             var surface = frame.surface(.{ .x = 4, .y = 2, .width = 32, .height = 1 });
             try text_input.draw(&surface);
         },
-        .text_area => {
+        .text_area, .text_area_full => {
             if (text_area.handle(.{ .key = .{ .code = .left } }) != .redraw) unreachable;
             if (text_area.handle(.{ .key = .{ .code = .backspace } }) != .redraw) unreachable;
             if (text_area.handle(.{ .text = if (iteration & 1 == 0) "x" else "o" }) != .redraw) unreachable;
@@ -1451,7 +1683,14 @@ fn renderIteration(
         .line_decode,
         .process_output_batch,
         .editor_middle_edit,
+        .editor_deep_line,
+        .editor_history,
+        .search_first_match,
         .line_break_scan,
+        .word_break_scan,
+        .image_kitty,
+        .image_iterm2,
+        .image_sixel,
         => unreachable,
         .sparse_cells => {
             var frame = renderer.frame();

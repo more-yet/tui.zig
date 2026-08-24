@@ -6,6 +6,7 @@ const line_break = @import("../text/line_break.zig");
 const text_wrap = @import("../text/wrap.zig");
 const ansi = @import("../terminal/ansi.zig");
 const capabilities_module = @import("../terminal/capabilities.zig");
+const image_module = @import("../terminal/image.zig");
 const cell_module = @import("cell.zig");
 const cursor_module = @import("cursor.zig");
 const damage_module = @import("damage.zig");
@@ -19,6 +20,7 @@ pub const Limits = struct {
     style_capacity: u16 = 256,
     tile_width: u8 = 8,
     tile_height: u8 = 4,
+    image_capacity: u16 = 16,
 };
 
 pub const FrameStats = struct {
@@ -45,6 +47,23 @@ pub const CellView = struct {
 pub const AsciiFill = struct {
     rect: geometry.Rect,
     glyph: u8,
+};
+
+pub const ImageOptions = struct {
+    image_id: u32,
+    placement_id: u32 = 1,
+    background: image_module.Rgb = .{},
+};
+
+pub const ImageError = image_module.ValidationError || error{
+    ImageCapacityExceeded,
+    InvalidImageBounds,
+};
+
+const ImageCommand = struct {
+    rect: geometry.Rect,
+    image: image_module.Image,
+    options: ImageOptions,
 };
 
 const StyledPosition = struct {
@@ -726,7 +745,8 @@ pub const Renderer = struct {
     presented_materialized: bool = false,
     uniform_output_cache: [2]UniformOutputCache = .{ .{}, .{} },
     uniform_output_cache_next: u1 = 0,
-    shaped_text_cache: ShapedTextCache = .{},
+    shaped_text_cache: [2]ShapedTextCache = @splat(.{}),
+    shaped_text_cache_next: u1 = 0,
     paragraph_layout_cache: [2]ParagraphLayoutCache = @splat(.{}),
     paragraph_layout_cache_next: u1 = 0,
     diff_output_cache: *[2]DiffOutputCache,
@@ -738,6 +758,11 @@ pub const Renderer = struct {
     ascii_line_cache: [ascii_line_cache_rows]AsciiLineRowCache = @splat(.{}),
     row_mapping_identity: bool = true,
     desired_cursor: ?cursor_module.Cursor = null,
+    images: []ImageCommand,
+    desired_image_count: u16 = 0,
+    presented_image_count: u16 = 0,
+    presented_image_protocol: capabilities_module.ImageProtocol = .none,
+    image_frame_active: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -761,6 +786,8 @@ pub const Renderer = struct {
         const diff_output_cache = try allocator.create([2]DiffOutputCache);
         errdefer allocator.destroy(diff_output_cache);
         diff_output_cache.* = .{ .{}, .{} };
+        const images = try allocator.alloc(ImageCommand, limits.image_capacity);
+        errdefer allocator.free(images);
         var damage = try damage_module.Map.init(
             allocator,
             dimensions,
@@ -784,6 +811,7 @@ pub const Renderer = struct {
             .presented = presented,
             .rows = rows,
             .diff_output_cache = diff_output_cache,
+            .images = images,
             .damage = damage,
             .glyphs = glyphs,
             .styles = styles,
@@ -793,6 +821,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         self.damage.deinit();
         self.allocator.destroy(self.diff_output_cache);
+        self.allocator.free(self.images);
         self.allocator.free(self.rows);
         self.allocator.free(self.presented);
         self.allocator.free(self.desired);
@@ -831,6 +860,8 @@ pub const Renderer = struct {
             self.pending_ascii.valid = false;
             self.row_mapping_identity = true;
             self.uniform_fill_state.valid = false;
+            self.desired_image_count = 0;
+            self.image_frame_active = false;
             self.invalidateAsciiLineRows(0, new_size.height);
             for (self.diff_output_cache) |*entry| entry.valid = false;
             return;
@@ -838,6 +869,8 @@ pub const Renderer = struct {
 
         var replacement = try Renderer.init(self.allocator, new_size, self.limits);
         replacement.desired_cursor = self.desired_cursor;
+        replacement.presented_image_count = self.presented_image_count;
+        replacement.presented_image_protocol = self.presented_image_protocol;
         self.deinit();
         self.* = replacement;
     }
@@ -923,6 +956,9 @@ pub const Renderer = struct {
     }
 
     pub fn frame(self: *Renderer) Frame {
+        self.desired_image_count = 0;
+        self.image_frame_active = self.presented_image_count != 0;
+        if (self.presented_image_count != 0) self.frame_pending = true;
         return .{ .renderer = self };
     }
 
@@ -957,7 +993,9 @@ pub const Renderer = struct {
             self.invalidateTerminal();
         }
         if (!self.frame_pending) return .{};
-        if (self.shadow_valid and self.pending_scroll == null and !self.pending_ascii.valid and self.desired_uniform == null) {
+        if (!self.image_frame_active and self.presented_image_count == 0 and
+            self.shadow_valid and self.pending_scroll == null and !self.pending_ascii.valid and self.desired_uniform == null)
+        {
             var stats: FrameStats = undefined;
             if (try self.presentCached(writer, capabilities, &stats)) return stats;
         }
@@ -1107,13 +1145,16 @@ pub const Renderer = struct {
         writer: *std.Io.Writer,
         capabilities: capabilities_module.Capabilities,
     ) std.Io.Writer.Error!FrameStats {
+        const image_frame = self.image_frame_active;
+        const replacing_images = image_frame and self.presented_image_count != 0;
+        if (replacing_images) self.invalidateTerminal();
         var stats = FrameStats{
             .dirty_rows = @intCast(self.damage.dirtyRowCount()),
             .full_repaint = !self.shadow_valid,
         };
         const full_repaint = stats.full_repaint;
 
-        const cache_entry = if (!full_repaint) self.prepareDiffOutputCache(capabilities) else null;
+        const cache_entry = if (!full_repaint and !image_frame) self.prepareDiffOutputCache(capabilities) else null;
         var capture: DiffCapture = undefined;
         const output_writer = if (cache_entry) |entry| output: {
             capture = DiffCapture.init(writer, &entry.output);
@@ -1130,10 +1171,24 @@ pub const Renderer = struct {
             .stats = &output_stats,
         };
 
+        if (replacing_images and self.presented_image_protocol == .kitty) {
+            image_module.clearKitty(output_writer) catch |err| {
+                self.invalidateTerminal();
+                return err;
+            };
+        }
+
         var emitted = self.encode(&encoder, full_repaint, &stats) catch |err| {
             self.invalidateTerminal();
             return err;
         };
+        if (image_frame and self.desired_image_count != 0) {
+            self.emitImages(&encoder, capabilities.image_protocol) catch |err| {
+                self.invalidateTerminal();
+                return err;
+            };
+            emitted = true;
+        }
         if (self.desired_cursor) |cursor| {
             const in_bounds = cursor.position.x < self.terminal_size.width and
                 cursor.position.y < self.terminal_size.height;
@@ -1162,6 +1217,7 @@ pub const Renderer = struct {
             std.debug.assert(!emitted);
             self.damage.reset();
             self.frame_pending = false;
+            if (image_frame) self.commitImageFrame(capabilities.image_protocol);
             return stats;
         }
         writer.flush() catch |err| {
@@ -1174,7 +1230,57 @@ pub const Renderer = struct {
         self.damage.reset();
         self.shadow_valid = true;
         self.frame_pending = false;
+        if (image_frame) self.commitImageFrame(capabilities.image_protocol);
         return stats;
+    }
+
+    fn emitImages(
+        self: *Renderer,
+        encoder: *ansi.Encoder,
+        protocol: capabilities_module.ImageProtocol,
+    ) std.Io.Writer.Error!void {
+        try encoder.beginSynchronized();
+        for (self.images[0..self.desired_image_count]) |command| {
+            try encoder.moveTo(command.rect.y, command.rect.x);
+            switch (protocol) {
+                .kitty => image_module.writeKitty(encoder.writer, command.image, .{
+                    .columns = command.rect.width,
+                    .rows = command.rect.height,
+                    .image_id = command.options.image_id,
+                    .placement_id = command.options.placement_id,
+                }) catch |err| switch (err) {
+                    error.WriteFailed => return error.WriteFailed,
+                    else => unreachable,
+                },
+                .iterm2 => image_module.writeIterm2(encoder.writer, command.image, .{
+                    .columns = command.rect.width,
+                    .rows = command.rect.height,
+                    .image_id = command.options.image_id,
+                    .placement_id = command.options.placement_id,
+                }) catch |err| switch (err) {
+                    error.WriteFailed => return error.WriteFailed,
+                    else => unreachable,
+                },
+                .sixel => {
+                    try encoder.writer.writeAll("\x1b[?80h");
+                    image_module.writeSixel(encoder.writer, command.image, command.options.background) catch |err| switch (err) {
+                        error.WriteFailed => return error.WriteFailed,
+                        else => unreachable,
+                    };
+                    try encoder.writer.writeAll("\x1b[?80l");
+                },
+                .none => try emitImageFallback(encoder, command),
+            }
+            if (protocol != .none) encoder.state.invalidate();
+        }
+        try encoder.endSynchronized();
+    }
+
+    fn commitImageFrame(self: *Renderer, protocol: capabilities_module.ImageProtocol) void {
+        self.presented_image_count = self.desired_image_count;
+        self.presented_image_protocol = protocol;
+        self.desired_image_count = 0;
+        self.image_frame_active = false;
     }
 
     fn encode(
@@ -2475,12 +2581,14 @@ pub const Renderer = struct {
         text: []const u8,
         width_profile: grapheme.WidthProfile,
     ) !?[]const ShapedGlyph {
-        const cache = &self.shaped_text_cache;
-        if (cache.valid and cache.width_profile == width_profile and
-            std.mem.eql(u8, cache.bytes[0..cache.byte_len], text))
-        {
-            return cache.glyphs[0..cache.glyph_count];
+        for (&self.shaped_text_cache) |*entry| {
+            if (entry.valid and entry.width_profile == width_profile and
+                std.mem.eql(u8, entry.bytes[0..entry.byte_len], text))
+            {
+                return entry.glyphs[0..entry.glyph_count];
+            }
         }
+        const cache = &self.shaped_text_cache[self.shaped_text_cache_next];
         if (text.len > cache.bytes.len) return null;
 
         var iterator = try grapheme.Iterator.init(text);
@@ -2505,6 +2613,7 @@ pub const Renderer = struct {
         cache.glyph_count = @intCast(count);
         cache.width_profile = width_profile;
         cache.valid = true;
+        self.shaped_text_cache_next +%= 1;
         return cache.glyphs[0..count];
     }
 
@@ -2658,6 +2767,30 @@ pub const Renderer = struct {
     }
 };
 
+fn emitImageFallback(encoder: *ansi.Encoder, command: ImageCommand) std.Io.Writer.Error!void {
+    const pixel_rows = @as(usize, command.rect.height) * 2;
+    var row: u16 = 0;
+    while (row < command.rect.height) : (row += 1) {
+        try encoder.moveTo(command.rect.y + row, command.rect.x);
+        var column: u16 = 0;
+        while (column < command.rect.width) : (column += 1) {
+            const source_x: u32 = @intCast((@as(u128, column) * command.image.width) / command.rect.width);
+            const top_y: u32 = @intCast((@as(u128, row) * 2 * command.image.height) / pixel_rows);
+            const bottom_y: u32 = @intCast(@min(
+                command.image.height - 1,
+                (@as(u128, row) * 2 + 1) * command.image.height / pixel_rows,
+            ));
+            const top = image_module.colorAt(command.image, source_x, top_y, command.options.background);
+            const bottom = image_module.colorAt(command.image, source_x, bottom_y, command.options.background);
+            try encoder.setStyle(.{
+                .foreground = .{ .rgb = .{ .r = top.red, .g = top.green, .b = top.blue } },
+                .background = .{ .rgb = .{ .r = bottom.red, .g = bottom.green, .b = bottom.blue } },
+            });
+            try encoder.writeGlyph("\xE2\x96\x80", 1);
+        }
+    }
+}
+
 pub const Frame = struct {
     renderer: *Renderer,
 
@@ -2669,6 +2802,28 @@ pub const Frame = struct {
             .{ .width = rect.width, .height = rect.height },
             geometry.Rect.fromSize(self.renderer.terminal_size),
         );
+    }
+
+    /// Records a native image. Pixel bytes must remain valid until `Renderer.present` succeeds.
+    pub fn putImage(
+        self: *Frame,
+        rect: geometry.Rect,
+        image: image_module.Image,
+        options: ImageOptions,
+    ) ImageError!void {
+        try image_module.validate(image);
+        if (rect.width == 0 or rect.height == 0 or rect.right() > self.renderer.terminal_size.width or
+            rect.bottom() > self.renderer.terminal_size.height) return error.InvalidImageBounds;
+        if (options.image_id == 0 or options.placement_id == 0) return error.InvalidIdentifier;
+        if (self.renderer.desired_image_count == self.renderer.images.len) return error.ImageCapacityExceeded;
+        self.renderer.images[self.renderer.desired_image_count] = .{
+            .rect = rect,
+            .image = image,
+            .options = options,
+        };
+        self.renderer.desired_image_count += 1;
+        self.renderer.image_frame_active = true;
+        self.renderer.frame_pending = true;
     }
 
     pub fn putText(
@@ -2713,6 +2868,12 @@ pub const Frame = struct {
                 x += 1;
             }
             return x - origin.x;
+        }
+        if (singleBrailleGlyph(text)) |glyph| {
+            const style_id = try self.renderer.styles.intern(style);
+            defer self.renderer.styles.release(style_id);
+            self.renderer.setGlyph(origin.x, origin.y, glyph, style_id, .narrow);
+            return 1;
         }
 
         return self.putUnicodeText(origin, text, style, width_profile, end_x);
@@ -2898,6 +3059,32 @@ pub const Surface = struct {
             .{ .width = rect.width, .height = rect.height },
             self.clip,
         );
+    }
+
+    /// Records an unclipped image in surface-local coordinates.
+    pub fn putImage(
+        self: *Surface,
+        rect: geometry.Rect,
+        image: image_module.Image,
+        options: ImageOptions,
+    ) ImageError!void {
+        if (rect.width == 0 or rect.height == 0 or rect.right() > self.extent.width or rect.bottom() > self.extent.height) {
+            return error.InvalidImageBounds;
+        }
+        const x = @as(u32, self.origin.x) + rect.x;
+        const y = @as(u32, self.origin.y) + rect.y;
+        const right = x + rect.width;
+        const bottom = y + rect.height;
+        if (x < self.clip.x or y < self.clip.y or right > self.clip.right() or bottom > self.clip.bottom()) {
+            return error.InvalidImageBounds;
+        }
+        var frame = Frame{ .renderer = self.renderer };
+        try frame.putImage(.{
+            .x = @intCast(x),
+            .y = @intCast(y),
+            .width = rect.width,
+            .height = rect.height,
+        }, image, options);
     }
 
     pub fn putText(
@@ -3422,6 +3609,12 @@ fn printableAscii(text: []const u8) bool {
         if (byte < 0x20 or byte > 0x7E) return false;
     }
     return true;
+}
+
+inline fn singleBrailleGlyph(text: []const u8) ?glyph_store.Glyph {
+    if (text.len != 3 or text[0] != 0xe2 or text[1] < 0xa0 or text[1] > 0xa3 or
+        text[2] < 0x80 or text[2] > 0xbf) return null;
+    return 0x2800 + (@as(glyph_store.Glyph, text[1] - 0xa0) << 6) + (text[2] - 0x80);
 }
 
 inline fn replaceUnstyledLineCell(
@@ -4196,4 +4389,104 @@ test "renderer rejects oversized dimensions before allocation" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+}
+
+test "renderer presents Kitty images and clears removed placements" {
+    var renderer = try Renderer.init(std.testing.allocator, .{ .width = 2, .height = 1 }, .{ .image_capacity = 1 });
+    defer renderer.deinit();
+    const pixels = [_]u8{ 255, 0, 0 };
+    var frame = renderer.frame();
+    try frame.putImage(
+        .{ .x = 0, .y = 0, .width = 2, .height = 1 },
+        .{ .pixels = &pixels, .width = 1, .height = 1, .format = .rgb8 },
+        .{ .image_id = 7 },
+    );
+    var image_buffer: [1024]u8 = undefined;
+    var image_output = std.Io.Writer.fixed(&image_buffer);
+    _ = try renderer.present(&image_output, .{ .image_protocol = .kitty });
+    try std.testing.expect(std.mem.indexOf(u8, image_output.buffered(), "\x1b_Ga=T,i=7") != null);
+
+    _ = renderer.frame();
+    var clear_buffer: [1024]u8 = undefined;
+    var clear_output = std.Io.Writer.fixed(&clear_buffer);
+    const stats = try renderer.present(&clear_output, .{ .image_protocol = .kitty });
+    try std.testing.expect(stats.full_repaint);
+    try std.testing.expect(std.mem.indexOf(u8, clear_output.buffered(), "\x1b_Ga=d,d=A\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clear_output.buffered(), "\x1b[2J") != null);
+}
+
+test "renderer uses half-block image fallback without allocation" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var renderer = try Renderer.init(failing.allocator(), .{ .width = 1, .height = 1 }, .{ .image_capacity = 1 });
+    defer renderer.deinit();
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    const pixels = [_]u8{ 255, 0, 0, 0, 0, 255 };
+    var frame = renderer.frame();
+    try frame.putImage(
+        .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        .{ .pixels = &pixels, .width = 1, .height = 2, .format = .rgb8 },
+        .{ .image_id = 1 },
+    );
+    var output_buffer: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    _ = try renderer.present(&output, .{ .color_depth = .truecolor });
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "\xE2\x96\x80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "38;2;255;0;0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "48;2;0;0;255") != null);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "renderer image capacity and clipping fail before presentation" {
+    var renderer = try Renderer.init(std.testing.allocator, .{ .width = 2, .height = 1 }, .{ .image_capacity = 1 });
+    defer renderer.deinit();
+    const pixels = [_]u8{ 0, 0, 0 };
+    var frame = renderer.frame();
+    var surface = frame.surface(.{ .x = 1, .y = 0, .width = 1, .height = 1 });
+    try std.testing.expectError(
+        error.InvalidImageBounds,
+        surface.putImage(
+            .{ .x = 0, .y = 0, .width = 2, .height = 1 },
+            .{ .pixels = &pixels, .width = 1, .height = 1, .format = .rgb8 },
+            .{ .image_id = 1 },
+        ),
+    );
+    try frame.putImage(
+        .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        .{ .pixels = &pixels, .width = 1, .height = 1, .format = .rgb8 },
+        .{ .image_id = 1 },
+    );
+    try std.testing.expectError(
+        error.ImageCapacityExceeded,
+        frame.putImage(
+            .{ .x = 1, .y = 0, .width = 1, .height = 1 },
+            .{ .pixels = &pixels, .width = 1, .height = 1, .format = .rgb8 },
+            .{ .image_id = 2 },
+        ),
+    );
+}
+
+test "ordinary frames remain eligible for diff output caching" {
+    var renderer = try Renderer.init(std.testing.allocator, .{ .width = 8, .height = 2 }, .{});
+    defer renderer.deinit();
+    var buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&buffer);
+    _ = try renderer.present(&output, .{});
+
+    var iteration: usize = 0;
+    while (iteration < 5) : (iteration += 1) {
+        var frame = renderer.frame();
+        try std.testing.expect(!renderer.image_frame_active);
+        var surface = frame.surface(.{ .x = 0, .y = 0, .width = 8, .height = 2 });
+        try surface.fill(geometry.Rect.fromSize(surface.size()), .{});
+        _ = try surface.putText(.{ .x = 0, .y = 0 }, if (iteration & 1 == 0) "a" else "b", .{}, .narrow);
+        output = std.Io.Writer.fixed(&buffer);
+        if (iteration >= 3) {
+            var stats: FrameStats = undefined;
+            try std.testing.expect(try renderer.presentCached(&output, .{}, &stats));
+            try std.testing.expectEqual(@as(u32, 8), stats.cells_compared);
+        } else {
+            _ = try renderer.present(&output, .{});
+        }
+    }
 }
