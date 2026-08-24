@@ -78,7 +78,7 @@ pub const CursorPosition = struct {
 };
 
 pub const TerminalReply = struct {
-    kind: enum { csi, osc },
+    kind: enum { csi, osc, apc },
     final: u8,
     raw: []const u8,
 };

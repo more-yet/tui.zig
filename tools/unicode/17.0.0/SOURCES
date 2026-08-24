@@ -5,4 +5,6 @@ https://www.unicode.org/Public/17.0.0/ucd/EastAsianWidth.txt
 https://www.unicode.org/Public/17.0.0/ucd/emoji/emoji-data.txt
 https://www.unicode.org/Public/17.0.0/ucd/LineBreak.txt
 https://www.unicode.org/Public/17.0.0/ucd/auxiliary/LineBreakTest.txt
+https://www.unicode.org/Public/17.0.0/ucd/auxiliary/WordBreakProperty.txt
+https://www.unicode.org/Public/17.0.0/ucd/auxiliary/WordBreakTest.txt
 https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedGeneralCategory.txt

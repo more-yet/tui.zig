@@ -8,6 +8,7 @@ const text_area = @import("widget/text_area.zig");
 const scrollback = @import("widget/scrollback.zig");
 const data = @import("widget/data.zig");
 const navigation = @import("widget/navigation.zig");
+const chart = @import("widget/chart.zig");
 
 pub const Update = @import("widget/update.zig").Update;
 pub const Label = display.Label;
@@ -27,8 +28,15 @@ pub const ScrollState = data.ScrollState;
 pub const Column = data.Column;
 pub const List = data.List;
 pub const Table = data.Table;
+pub const TreeState = data.TreeState;
+pub const Tree = data.Tree;
+pub const TaskStatus = data.TaskStatus;
+pub const TaskListState = data.TaskListState;
+pub const TaskList = data.TaskList;
 pub const MenuState = navigation.MenuState;
 pub const Menu = navigation.Menu;
+pub const ChartRange = chart.Range;
+pub const LineChart = chart.LineChart;
 
 /// Calls a caller-owned widget's mandatory `draw` method with no runtime dispatch.
 pub inline fn draw(widget: anytype, surface: *render.Surface) @TypeOf(widget.draw(surface)) {
@@ -110,4 +118,5 @@ test {
     _ = scrollback;
     _ = data;
     _ = navigation;
+    _ = chart;
 }

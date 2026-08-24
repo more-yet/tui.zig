@@ -40,9 +40,14 @@ pub const TextArea = struct {
         return failure;
     }
 
-    pub fn draw(self: *TextArea, surface: *render.Surface) !void {
+    pub fn layout(self: *TextArea, size: render.Size) bool {
+        return self.model.setViewportSize(size.width, size.height);
+    }
+
+    pub fn draw(self: *const TextArea, surface: *render.Surface) !void {
         const size = surface.size();
-        _ = self.model.setViewportSize(size.width, size.height);
+        std.debug.assert(self.model.viewport.width == size.width);
+        std.debug.assert(self.model.viewport.height == size.height);
         if (size.width == 0 or size.height == 0) return;
 
         const state = theme.State.from(self.enabled, self.focused);
@@ -276,6 +281,7 @@ test "text area owns rows and styles multiline selections" {
         .role = .{ .normal = .{ .foreground = .{ .indexed = 2 } } },
         .selection_role = .{ .normal = .{ .background = .{ .indexed = 4 } } },
     };
+    _ = area.layout(.{ .width = 5, .height = 2 });
     var renderer = try render.Renderer.init(std.testing.allocator, .{ .width = 5, .height = 2 }, .{});
     defer renderer.deinit();
 
@@ -318,6 +324,7 @@ test "text area clips a wide grapheme at the left viewport edge" {
     var area = TextArea{ .model = &model };
     var renderer = try render.Renderer.init(std.testing.allocator, .{ .width = 2, .height = 1 }, .{});
     defer renderer.deinit();
+    _ = area.layout(renderer.size());
     var frame = renderer.frame();
     var surface = frame.surface(render.Rect.fromSize(renderer.size()));
     try area.draw(&surface);
@@ -339,6 +346,7 @@ test "text area renders grapheme-safe soft rows and selections" {
     };
     var renderer = try render.Renderer.init(std.testing.allocator, .{ .width = 4, .height = 3 }, .{});
     defer renderer.deinit();
+    _ = area.layout(renderer.size());
     var frame = renderer.frame();
     var surface = frame.surface(render.Rect.fromSize(renderer.size()));
     try area.draw(&surface);
@@ -366,6 +374,7 @@ test "text area drawing and handling allocate nothing" {
     var allocator_state = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var renderer = try render.Renderer.init(allocator_state.allocator(), .{ .width = 4, .height = 2 }, .{});
     defer renderer.deinit();
+    _ = area.layout(renderer.size());
     allocator_state.fail_index = allocator_state.alloc_index;
     allocator_state.resize_fail_index = allocator_state.resize_index;
 

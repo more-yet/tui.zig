@@ -58,6 +58,17 @@ jobs:
       - name: Test ReleaseFast
         run: zig build test -Doptimize=ReleaseFast
 
+      - name: Verify C ABI symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="${RUNNER_TEMP}/tui-v1.symbols"
+          nm -D --defined-only --format=posix zig-out/lib/libtui.so.1.0.0 |
+            while read -r symbol _; do
+              case "${symbol}" in tui_*) printf '%s\n' "${symbol}" ;; esac
+            done | LC_ALL=C sort > "${actual}"
+          diff -u test/c/tui-v1.symbols "${actual}"
+
       - name: Verify generated Unicode data
         run: zig build unicode-check
 

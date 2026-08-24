@@ -20,6 +20,26 @@ pub const FeatureSupport = enum {
     supported,
 };
 
+pub const ImageProtocol = enum {
+    none,
+    kitty,
+    iterm2,
+    sixel,
+};
+
+pub const ImageSupport = struct {
+    kitty: bool = false,
+    iterm2: bool = false,
+    sixel: bool = false,
+
+    pub fn preferred(self: ImageSupport) ImageProtocol {
+        if (self.kitty) return .kitty;
+        if (self.iterm2) return .iterm2;
+        if (self.sixel) return .sixel;
+        return .none;
+    }
+};
+
 pub const Rgb16 = struct {
     red: u16,
     green: u16,
@@ -51,6 +71,7 @@ pub const Observations = struct {
     default_background: ?Rgb16 = null,
     kitty_keyboard: FeatureSupport = .unknown,
     synchronized_output: FeatureSupport = .unknown,
+    kitty_graphics: FeatureSupport = .unknown,
 };
 
 /// Trusted local configuration, such as application policy or terminfo results.
@@ -60,6 +81,9 @@ pub const Profile = struct {
     clipboard_write: bool = false,
     hyperlinks: bool = false,
     width_profile: grapheme.WidthProfile = .narrow,
+    image_support: ImageSupport = .{},
+    image_protocol: ?ImageProtocol = null,
+    query_kitty_graphics: bool = false,
 
     /// Converts caller-read terminfo fields without reading process environment state.
     pub fn fromTerminfo(max_colors: ?u32, direct_color: bool, background_color_erase: bool) Profile {
@@ -84,6 +108,7 @@ pub const Capabilities = struct {
     kitty_keyboard: bool = false,
     text_sizing: TextSizing = .none,
     width_profile: grapheme.WidthProfile = .narrow,
+    image_protocol: ImageProtocol = .none,
 };
 
 pub const Negotiator = struct {
@@ -98,15 +123,31 @@ pub const Negotiator = struct {
     background_query_pending: bool = false,
     kitty_query_pending: bool = false,
     synchronized_query_pending: bool = false,
+    kitty_graphics_query_pending: bool = false,
+    kitty_graphics_query_enabled: bool = false,
+    image_fallback: ImageProtocol = .none,
+
+    const kitty_graphics_query_id = 31;
 
     pub fn init(profile: Profile) Negotiator {
-        return .{ .capabilities = .{
-            .color_depth = profile.color_depth,
-            .background_color_erase = profile.background_color_erase,
-            .clipboard_write = profile.clipboard_write,
-            .hyperlinks = profile.hyperlinks,
-            .width_profile = profile.width_profile,
-        } };
+        const preferred = profile.image_support.preferred();
+        return .{
+            .capabilities = .{
+                .color_depth = profile.color_depth,
+                .background_color_erase = profile.background_color_erase,
+                .clipboard_write = profile.clipboard_write,
+                .hyperlinks = profile.hyperlinks,
+                .width_profile = profile.width_profile,
+                .image_protocol = profile.image_protocol orelse preferred,
+            },
+            .kitty_graphics_query_enabled = profile.query_kitty_graphics and profile.image_protocol == null,
+            .image_fallback = if (profile.image_support.iterm2)
+                .iterm2
+            else if (profile.image_support.sixel)
+                .sixel
+            else
+                .none,
+        };
     }
 
     pub fn writeQueries(self: *Negotiator, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -114,6 +155,7 @@ pub const Negotiator = struct {
         self.capabilities.kitty_keyboard = false;
         self.capabilities.synchronized_output = false;
         self.capabilities.text_sizing = .none;
+        if (self.kitty_graphics_query_enabled) self.capabilities.image_protocol = self.image_fallback;
         self.observations = .{};
         self.primary_query_pending = true;
         self.secondary_query_pending = true;
@@ -121,11 +163,16 @@ pub const Negotiator = struct {
         self.background_query_pending = true;
         self.kitty_query_pending = true;
         self.synchronized_query_pending = true;
+        self.kitty_graphics_query_pending = self.kitty_graphics_query_enabled;
         self.text_probe_active = true;
         errdefer self.cancelQueries();
 
-        // DA1 immediately after the Kitty query is the protocol-defined unsupported barrier.
-        try writer.writeAll("\x1b[?u\x1b[c\x1b[>0c\x1b[?2026$p");
+        // DA1 immediately after the Kitty queries is the protocol-defined unsupported barrier.
+        try writer.writeAll("\x1b[?u");
+        if (self.kitty_graphics_query_pending) {
+            try writer.writeAll("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+        }
+        try writer.writeAll("\x1b[c\x1b[>0c\x1b[?2026$p");
         try writer.writeAll("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
         // OSC 66 support is detected by measuring the cursor after width and scaling probes.
         try writer.writeAll("\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n");
@@ -141,6 +188,7 @@ pub const Negotiator = struct {
         self.background_query_pending = false;
         self.kitty_query_pending = false;
         self.synchronized_query_pending = false;
+        self.kitty_graphics_query_pending = false;
     }
 
     pub inline fn queriesPending(self: *const Negotiator) bool {
@@ -150,7 +198,8 @@ pub const Negotiator = struct {
             self.foreground_query_pending or
             self.background_query_pending or
             self.kitty_query_pending or
-            self.synchronized_query_pending;
+            self.synchronized_query_pending or
+            self.kitty_graphics_query_pending;
     }
 
     pub fn observe(self: *Negotiator, value: input.Event) void {
@@ -165,6 +214,7 @@ pub const Negotiator = struct {
         switch (reply.kind) {
             .csi => self.observeCsi(reply),
             .osc => self.observeOsc(reply.raw),
+            .apc => self.observeApc(reply.raw),
         }
     }
 
@@ -178,6 +228,11 @@ pub const Negotiator = struct {
                 if (self.kitty_query_pending) {
                     self.observations.kitty_keyboard = .unsupported;
                     self.kitty_query_pending = false;
+                }
+                if (self.kitty_graphics_query_pending) {
+                    self.capabilities.image_protocol = self.image_fallback;
+                    self.observations.kitty_graphics = .unsupported;
+                    self.kitty_graphics_query_pending = false;
                 }
                 return;
             }
@@ -217,6 +272,13 @@ pub const Negotiator = struct {
                 self.background_query_pending = false;
             }
         }
+    }
+
+    fn observeApc(self: *Negotiator, raw: []const u8) void {
+        if (!self.kitty_graphics_query_pending or !kittyGraphicsReply(raw, kitty_graphics_query_id)) return;
+        self.capabilities.image_protocol = .kitty;
+        self.observations.kitty_graphics = .supported;
+        self.kitty_graphics_query_pending = false;
     }
 
     fn observeTextProbe(self: *Negotiator, position: input.CursorPosition) void {
@@ -298,6 +360,13 @@ fn synchronizedReply(raw: []const u8) ?bool {
     const status = std.fmt.parseInt(u8, raw[prefix.len .. raw.len - 1], 10) catch return null;
     if (status > 4) return null;
     return status != 0;
+}
+
+fn kittyGraphicsReply(raw: []const u8, expected_id: u32) bool {
+    if (!std.mem.startsWith(u8, raw, "Gi=")) return false;
+    const separator = std.mem.indexOfScalarPos(u8, raw, 3, ';') orelse return false;
+    const id = std.fmt.parseInt(u32, raw[3..separator], 10) catch return false;
+    return id == expected_id and separator + 1 < raw.len;
 }
 
 fn advancedBy(from: input.CursorPosition, to: input.CursorPosition, cells: u16) bool {
@@ -399,4 +468,32 @@ test "malformed, failed, and cancelled queries stay conservative" {
     try std.testing.expect(!negotiator.queriesPending());
     try std.testing.expect(!negotiator.capabilities.kitty_keyboard);
     try std.testing.expect(!negotiator.capabilities.synchronized_output);
+}
+
+test "image profiles prefer Kitty and opt-in probes use the DA barrier" {
+    const trusted = Negotiator.init(.{
+        .image_support = .{ .iterm2 = true, .sixel = true },
+        .image_protocol = .sixel,
+        .query_kitty_graphics = true,
+    });
+    try std.testing.expectEqual(ImageProtocol.sixel, trusted.capabilities.image_protocol);
+    try std.testing.expect(!trusted.kitty_graphics_query_enabled);
+
+    var negotiator = Negotiator.init(.{
+        .image_support = .{ .iterm2 = true, .sixel = true },
+        .query_kitty_graphics = true,
+    });
+    try std.testing.expectEqual(ImageProtocol.iterm2, negotiator.capabilities.image_protocol);
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    try negotiator.writeQueries(&output);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c") != null);
+    negotiator.observe(.{ .terminal_reply = .{ .kind = .apc, .final = '\\', .raw = "Gi=31;OK" } });
+    try std.testing.expectEqual(ImageProtocol.kitty, negotiator.capabilities.image_protocol);
+    try std.testing.expectEqual(FeatureSupport.supported, negotiator.observations.kitty_graphics);
+
+    try negotiator.writeQueries(&output);
+    negotiator.observe(.{ .terminal_reply = .{ .kind = .csi, .final = 'c', .raw = "?1;2" } });
+    try std.testing.expectEqual(ImageProtocol.iterm2, negotiator.capabilities.image_protocol);
+    try std.testing.expectEqual(FeatureSupport.unsupported, negotiator.observations.kitty_graphics);
 }

@@ -98,11 +98,16 @@ pub const AssistantApp = struct {
         return if (changed) .redraw else .handled;
     }
 
-    pub fn draw(self: *AssistantApp, surface: *tui.render.Surface) !void {
-        const regions = layout(surface.size());
+    pub fn layout(self: *AssistantApp, size: tui.render.Size) void {
+        const regions = layoutRegions(size);
         self.transcript_bounds = regions.transcript;
         self.visible_rows = regions.transcript.height;
         _ = self.viewport.update(self.ring.count(), self.visible_rows, 0);
+        _ = self.prompt.layout(.{ .width = regions.prompt.width, .height = regions.prompt.height });
+    }
+
+    pub fn draw(self: *AssistantApp, surface: *tui.render.Surface) !void {
+        const regions = layoutRegions(surface.size());
 
         const background = tui.render.Style{
             .foreground = .{ .indexed = 7 },
@@ -240,6 +245,7 @@ pub fn main(init: std.process.Init) !void {
     var prompt_storage: [1024]u8 = undefined;
     var prompt = try tui.editor.Model.init(&prompt_storage, "");
     var application = try AssistantApp.init(&ring, &prompt);
+    application.layout(renderer.size());
 
     var read_buffer: [512]u8 = undefined;
     var timers: [1]tui.runtime.TimerSlot = undefined;
@@ -314,6 +320,7 @@ const AssistantSink = struct {
             },
             .resize => |new_size| {
                 try self.renderer.resize(new_size);
+                self.application.layout(new_size);
                 self.changed.* = true;
             },
             .timer => |timer| if (timer.id == response_timer_id) {
@@ -338,7 +345,7 @@ const Regions = struct {
     footer: tui.render.Rect,
 };
 
-fn layout(size: tui.render.Size) Regions {
+fn layoutRegions(size: tui.render.Size) Regions {
     const header_height: u16 = @intFromBool(size.height != 0);
     const footer_height: u16 = @intFromBool(size.height > 1);
     const content_height = size.height - header_height - footer_height;

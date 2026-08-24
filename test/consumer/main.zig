@@ -16,7 +16,12 @@ pub fn main(init: std.process.Init) !void {
 
     var editor_storage: [64]u8 = undefined;
     var editor = try tui.editor.Model.init(&editor_storage, "one\ntwo");
+    var history_records: [4]tui.editor.HistoryRecord = undefined;
+    var history_bytes: [32]u8 = undefined;
+    var history = tui.editor.History.init(&history_records, &history_bytes, .reject);
+    editor.setHistory(&history);
     var area = tui.widget.TextArea{ .model = &editor };
+    _ = area.layout(surface.size());
     try area.draw(&surface);
 
     const Decoder = tui.scroll.LineDecoder(32);

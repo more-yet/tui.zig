@@ -236,6 +236,45 @@ test "ASCII multiline editor matches a selection-aware reference model" {
     }
 }
 
+test "bounded multiline history survives deterministic undo and redo sequences" {
+    var storage: [64]u8 = undefined;
+    var records: [512]tui.editor.HistoryRecord = undefined;
+    var history_bytes: [1024]u8 = undefined;
+    var history = tui.editor.History.init(&records, &history_bytes, .reject);
+    var editor = try tui.editor.Model.init(&storage, "");
+    editor.setHistory(&history);
+    var random: u64 = 0xA24B_AED4_963E_E407;
+
+    for (0..500) |_| {
+        switch (nextRandom(&random) % 5) {
+            0 => {
+                const byte: u8 = @intCast('a' + nextRandom(&random) % 26);
+                _ = editor.handle(.{ .text = &.{byte} });
+            },
+            1 => _ = editor.handle(.{ .key = .{ .code = .backspace } }),
+            2 => _ = editor.handle(.{ .key = .{ .code = .delete } }),
+            3 => _ = editor.handle(.{ .key = .{ .code = .left } }),
+            4 => _ = editor.handle(.{ .key = .{ .code = .right } }),
+            else => unreachable,
+        }
+        try std.testing.expect(editor.cursor <= editor.value().len);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(editor.value()));
+    }
+
+    var final: [64]u8 = undefined;
+    const final_len = editor.value().len;
+    @memcpy(final[0..final_len], editor.value());
+    while (editor.canUndo()) {
+        try std.testing.expect(try editor.undo());
+        try std.testing.expect(editor.cursor <= editor.value().len);
+    }
+    while (editor.canRedo()) {
+        try std.testing.expect(try editor.redo());
+        try std.testing.expect(editor.cursor <= editor.value().len);
+    }
+    try std.testing.expectEqualSlices(u8, final[0..final_len], editor.value());
+}
+
 test "renderer mutations match a plain ASCII grid without allocation" {
     const width = 32;
     const height = 12;

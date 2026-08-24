@@ -137,6 +137,10 @@ test "text area integrates headless input drawing caret and edit failures" {
     const App = struct {
         area: tui.widget.TextArea,
 
+        pub fn layout(self: *@This(), size: tui.render.Size) void {
+            _ = self.area.layout(size);
+        }
+
         pub fn draw(self: *@This(), surface: *tui.render.Surface) !void {
             try self.area.draw(surface);
         }

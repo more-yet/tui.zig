@@ -1,6 +1,9 @@
 //! Bounded single-line editing over caller-owned storage.
 
 const std = @import("std");
+const edit_core = @import("../editor/core.zig");
+const actions = @import("../editor/actions.zig");
+const history_module = @import("../editor/history.zig");
 const input = @import("../input.zig");
 const render = @import("../render.zig");
 const text = @import("../text.zig");
@@ -20,12 +23,10 @@ pub const EditError = error{
     InvalidBoundary,
     InvalidText,
     OverlappingInput,
+    HistoryCapacityExceeded,
 };
 
-pub const Selection = struct {
-    start: usize,
-    end: usize,
-};
+pub const Selection = edit_core.Selection;
 
 pub const TextInput = struct {
     storage: []u8,
@@ -53,6 +54,7 @@ pub const TextInput = struct {
     paste_active: bool = false,
     paste_blocked: bool = false,
     pending_failure: ?EditError = null,
+    history: ?*history_module.History = null,
 
     /// Caller storage is the hard memory and adversarial-input work bound.
     pub fn init(storage: []u8, initial: []const u8) InitError!TextInput {
@@ -75,12 +77,7 @@ pub const TextInput = struct {
     }
 
     pub fn selection(self: *const TextInput) ?Selection {
-        const anchor = self.anchor orelse return null;
-        if (anchor == self.cursor) return null;
-        return .{
-            .start = @min(anchor, self.cursor),
-            .end = @max(anchor, self.cursor),
-        };
+        return edit_core.selection(self.anchor, self.cursor);
     }
 
     pub fn selectedText(self: *const TextInput) ?[]const u8 {
@@ -132,7 +129,48 @@ pub const TextInput = struct {
             .capacity => error.CapacityExceeded,
             .invalid => error.InvalidText,
             .overlapping => error.OverlappingInput,
+            .history => error.HistoryCapacityExceeded,
         };
+    }
+
+    pub fn setHistory(self: *TextInput, history: ?*history_module.History) void {
+        self.resetPaste();
+        if (history) |history_ptr| history_ptr.clear();
+        self.history = history;
+    }
+
+    pub fn canUndo(self: *const TextInput) bool {
+        return if (self.history) |history_ptr| history_ptr.canUndo() else false;
+    }
+
+    pub fn canRedo(self: *const TextInput) bool {
+        return if (self.history) |history_ptr| history_ptr.canRedo() else false;
+    }
+
+    pub fn undo(self: *TextInput) EditError!bool {
+        const history = self.history orelse return false;
+        const first = history.peekUndo() orelse return false;
+        const transaction = first.transaction;
+        while (history.peekUndo()) |edit| {
+            if (edit.transaction != transaction) break;
+            if (self.replaceRange(edit.start, edit.start + edit.inserted.len, edit.removed, false) != .inserted) unreachable;
+            _ = try self.setSelection(edit.before.anchor orelse edit.before.cursor, edit.before.cursor);
+            history.commitUndo();
+        }
+        return true;
+    }
+
+    pub fn redo(self: *TextInput) EditError!bool {
+        const history = self.history orelse return false;
+        const first = history.peekRedo() orelse return false;
+        const transaction = first.transaction;
+        while (history.peekRedo()) |edit| {
+            if (edit.transaction != transaction) break;
+            if (self.replaceRange(edit.start, edit.start + edit.removed.len, edit.inserted, false) != .inserted) unreachable;
+            _ = try self.setSelection(edit.after.anchor orelse edit.after.cursor, edit.after.cursor);
+            history.commitRedo();
+        }
+        return true;
     }
 
     pub fn handle(self: *TextInput, event: input.Event) Update {
@@ -141,11 +179,10 @@ pub const TextInput = struct {
             return .ignored;
         }
         return switch (event) {
-            .key => |key| self.handleKey(key),
-            .text => |bytes| self.insertionUpdate(self.replace(bytes)),
             .paste_start => start: {
                 self.resetPaste();
                 self.paste_active = true;
+                if (self.history) |history| history.beginTransaction();
                 break :start .handled;
             },
             .paste_chunk => |chunk| self.handlePasteChunk(chunk),
@@ -161,7 +198,10 @@ pub const TextInput = struct {
                 self.resetPaste();
                 break :malformed .handled;
             },
-            else => .ignored,
+            else => if (actions.applyDefault(self, event, .single_line)) |update|
+                update
+            else
+                .ignored,
         };
     }
 
@@ -234,40 +274,38 @@ pub const TextInput = struct {
         _ = try surface.putText(.{ .x = caret_x, .y = 0 }, caret_text, caret_style, self.width_profile);
     }
 
-    fn handleKey(self: *TextInput, key: input.Key) Update {
-        if (key.action == .release) return .ignored;
+    pub inline fn applyAction(self: *TextInput, action: actions.Action) Update {
         self.syncMetrics();
-        switch (key.code) {
-            .left => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
-                return if (self.moveLeft(key.modifiers.shift)) .redraw else .handled;
-            },
-            .right => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
-                return if (self.moveRight(key.modifiers.shift)) .redraw else .handled;
-            },
-            .home => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
-                return if (self.moveHome(key.modifiers.shift)) .redraw else .handled;
-            },
-            .end => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
-                return if (self.moveEnd(key.modifiers.shift)) .redraw else .handled;
-            },
-            .backspace => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
+        return switch (action) {
+            .move_left => |extend| if (self.moveLeft(extend)) .redraw else .handled,
+            .move_right => |extend| if (self.moveRight(extend)) .redraw else .handled,
+            .move_home => |extend| if (self.moveHome(extend)) .redraw else .handled,
+            .move_end => |extend| if (self.moveEnd(extend)) .redraw else .handled,
+            .move_word_left => |extend| if (self.moveTo(actions.previousWordStart(self.value(), self.cursor), extend)) .redraw else .handled,
+            .move_word_right => |extend| if (self.moveTo(actions.nextWordEnd(self.value(), self.cursor), extend)) .redraw else .handled,
+            .delete_backward => {
                 if (self.selection() != null) return self.insertionUpdate(self.replace(""));
                 if (self.cursor == 0) return .handled;
-                return if (self.erase(self.previous_boundary, self.cursor)) .redraw else .handled;
+                return self.insertionUpdate(self.replaceRange(self.previous_boundary, self.cursor, "", true));
             },
-            .delete => {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
+            .delete_forward => {
                 if (self.selection() != null) return self.insertionUpdate(self.replace(""));
                 if (self.cursor == self.len) return .handled;
-                return if (self.erase(self.cursor, self.next_boundary)) .redraw else .handled;
+                return self.insertionUpdate(self.replaceRange(self.cursor, self.next_boundary, "", true));
             },
-            .codepoint => |codepoint| {
-                if (hasTextModifiers(key.modifiers)) return .ignored;
+            .delete_word_backward => {
+                if (self.selection() != null) return self.insertionUpdate(self.replace(""));
+                const start = actions.previousWordStart(self.value(), self.cursor);
+                if (start == self.cursor) return .handled;
+                return self.insertionUpdate(self.replaceRange(start, self.cursor, "", true));
+            },
+            .delete_word_forward => {
+                if (self.selection() != null) return self.insertionUpdate(self.replace(""));
+                const end = actions.nextWordEnd(self.value(), self.cursor);
+                if (end == self.cursor) return .handled;
+                return self.insertionUpdate(self.replaceRange(self.cursor, end, "", true));
+            },
+            .insert_codepoint => |codepoint| {
                 if (codepoint == '\r' or codepoint == '\n' or codepoint == '\t') return .ignored;
                 var encoded: [4]u8 = undefined;
                 const encoded_len = std.unicode.utf8Encode(codepoint, &encoded) catch {
@@ -276,8 +314,12 @@ pub const TextInput = struct {
                 };
                 return self.insertionUpdate(self.replace(encoded[0..encoded_len]));
             },
-            else => return .ignored,
-        }
+            .insert_text => |bytes| self.insertionUpdate(self.replace(bytes)),
+            .select_all => if (self.selectAll()) .redraw else .handled,
+            .undo => self.historyUpdate(self.undo()),
+            .redo => self.historyUpdate(self.redo()),
+            .move_up, .move_down, .page_up, .page_down, .insert_newline => .ignored,
+        };
     }
 
     fn moveLeft(self: *TextInput, extend: bool) bool {
@@ -362,58 +404,92 @@ pub const TextInput = struct {
         return self.cursor != previous_cursor or self.anchor != previous_anchor;
     }
 
-    fn replace(self: *TextInput, bytes: []const u8) InsertResult {
-        const selected = self.selection() orelse return self.insert(bytes);
-        if (slicesOverlap(self.storage, bytes)) return .overlapping;
+    inline fn replace(self: *TextInput, bytes: []const u8) InsertResult {
+        const selected = self.selection() orelse Selection{ .start = self.cursor, .end = self.cursor };
+        return self.replaceRange(selected.start, selected.end, bytes, true);
+    }
 
-        const removed_len = selected.end - selected.start;
+    fn replaceRange(self: *TextInput, start: usize, end: usize, bytes: []const u8, record_history: bool) InsertResult {
+        std.debug.assert(start <= end and end <= self.len);
+        if (edit_core.slicesOverlap(self.storage, bytes)) return .overlapping;
+
+        const removed_len = end - start;
         const retained_len = self.len - removed_len;
         if (bytes.len > self.storage.len - retained_len) return .capacity;
-
-        const ascii_edit_safe = self.measured_profile == self.width_profile and
-            asciiReplacementIsSafe(self.value(), selected.start, selected.end, bytes);
-        if (!ascii_edit_safe) {
-            validateTextParts(.{
-                self.value()[0..selected.start],
-                bytes,
-                self.value()[selected.end..],
-            }) catch return .invalid;
-        }
+        if (removed_len == 0 and bytes.len == 0) return .empty;
 
         const old_len = self.len;
+        const ascii_edit_safe = self.measured_profile == self.width_profile and
+            asciiReplacementIsSafe(self.value(), start, end, bytes);
+        var prepared_location: ?Location = null;
+        var insertion_spliced = false;
+        if (!ascii_edit_safe) {
+            if (start == end) {
+                // Pure insertions can be rolled back without retaining removed caller data.
+                const tentative = edit_core.splice(self.storage, old_len, start, end, bytes);
+                prepared_location = validateAndLocate(
+                    self.storage[0..tentative.new_len],
+                    tentative.target,
+                    .forward,
+                    self.width_profile,
+                ) catch {
+                    rollbackInsertion(self.storage, old_len, start, bytes.len);
+                    return .invalid;
+                };
+                insertion_spliced = true;
+            } else {
+                validateTextParts(.{
+                    self.value()[0..start],
+                    bytes,
+                    self.value()[end..],
+                }) catch return .invalid;
+            }
+        }
+
+        const history_index = if (record_history) history: {
+            const history_ptr = self.history orelse break :history null;
+            break :history history_ptr.record(
+                start,
+                self.storage[start..end],
+                bytes,
+                .{ .cursor = self.cursor, .anchor = self.anchor },
+            ) catch {
+                if (insertion_spliced) rollbackInsertion(self.storage, old_len, start, bytes.len);
+                return .history;
+            };
+        } else null;
+
         const old_cursor = self.cursor;
         const old_cursor_column = self.cursor_column;
-        const target = selected.start + bytes.len;
-        const new_len = retained_len + bytes.len;
-        if (bytes.len > removed_len) {
-            std.mem.copyBackwards(
-                u8,
-                self.storage[target..new_len],
-                self.storage[selected.end..old_len],
-            );
-        } else {
-            std.mem.copyForwards(
-                u8,
-                self.storage[target..new_len],
-                self.storage[selected.end..old_len],
-            );
-        }
-        std.mem.copyForwards(u8, self.storage[selected.start..target], bytes);
+        const ascii_previous = if (ascii_edit_safe and bytes.len == 0) previousBoundary(self.value(), start) else 0;
+        const ascii_next_delta = if (ascii_edit_safe and end != old_len) nextBoundary(self.value(), end) - end else 0;
+        const splice = if (insertion_spliced)
+            edit_core.Splice{ .target = start + bytes.len, .new_len = old_len + bytes.len }
+        else
+            edit_core.splice(self.storage, old_len, start, end, bytes);
+        const target = splice.target;
+        const new_len = splice.new_len;
 
         self.len = new_len;
         self.cursor = target;
         self.anchor = null;
         if (ascii_edit_safe) {
-            const start_column = if (old_cursor == selected.start)
+            const start_column = if (old_cursor == start)
                 old_cursor_column
             else
                 old_cursor_column - removed_len;
-            self.previous_boundary = if (target == 0) 0 else target - 1;
-            self.next_boundary = if (target == new_len) new_len else target + 1;
+            self.previous_boundary = if (bytes.len == 0) ascii_previous else target - 1;
+            self.next_boundary = if (target == new_len) new_len else target + ascii_next_delta;
             self.display_width = self.display_width - removed_len + bytes.len;
             self.cursor_column = start_column + bytes.len;
         } else {
-            const location = validateAndLocate(self.value(), target, .forward, self.width_profile) catch unreachable;
+            const location = prepared_location orelse validateAndLocate(
+                self.value(),
+                target,
+                if (bytes.len == 0) .backward else .forward,
+                self.width_profile,
+            ) catch unreachable;
+            self.cursor = location.cursor;
             self.previous_boundary = location.previous;
             self.next_boundary = location.next;
             self.display_width = location.total_width;
@@ -422,103 +498,15 @@ pub const TextInput = struct {
         self.measured_profile = self.width_profile;
         self.view_start = 0;
         self.view_column = 0;
+        if (history_index) |index| self.history.?.finish(index, .{ .cursor = self.cursor, .anchor = self.anchor });
         return .inserted;
-    }
-
-    fn insert(self: *TextInput, bytes: []const u8) InsertResult {
-        if (bytes.len == 0) return .empty;
-        if (slicesOverlap(self.storage, bytes)) return .overlapping;
-        if (bytes.len > self.storage.len - self.len) return .capacity;
-
-        const ascii_insertion_safe = self.measured_profile == self.width_profile and
-            asciiInsertionIsSafe(self.value(), self.cursor, bytes);
-        const old_len = self.len;
-        const target = self.cursor + bytes.len;
-        const new_len = old_len + bytes.len;
-        std.mem.copyBackwards(
-            u8,
-            self.storage[target..new_len],
-            self.storage[self.cursor..old_len],
-        );
-        std.mem.copyForwards(u8, self.storage[self.cursor..target], bytes);
-        if (ascii_insertion_safe) {
-            self.len = new_len;
-            self.cursor = target;
-            self.previous_boundary = target - 1;
-            self.next_boundary = if (target == new_len) new_len else self.next_boundary + bytes.len;
-            self.display_width += bytes.len;
-            self.cursor_column += bytes.len;
-            self.anchor = null;
-            self.measured_profile = self.width_profile;
-            self.view_start = 0;
-            self.view_column = 0;
-            return .inserted;
-        }
-        const location = validateAndLocate(
-            self.storage[0..new_len],
-            target,
-            .forward,
-            self.width_profile,
-        ) catch {
-            std.mem.copyForwards(
-                u8,
-                self.storage[self.cursor..old_len],
-                self.storage[target..new_len],
-            );
-            return .invalid;
-        };
-
-        self.len = new_len;
-        self.cursor = location.cursor;
-        self.previous_boundary = location.previous;
-        self.next_boundary = location.next;
-        self.display_width = location.total_width;
-        self.cursor_column = location.cursor_width;
-        self.anchor = null;
-        self.measured_profile = self.width_profile;
-        self.view_start = 0;
-        self.view_column = 0;
-        return .inserted;
-    }
-
-    fn erase(self: *TextInput, start: usize, end: usize) bool {
-        const removed_len = end - start;
-        std.debug.assert(removed_len <= text.max_grapheme_bytes);
-        var removed: [text.max_grapheme_bytes]u8 = undefined;
-        @memcpy(removed[0..removed_len], self.storage[start..end]);
-
-        const old_len = self.len;
-        const new_len = old_len - removed_len;
-        std.mem.copyForwards(u8, self.storage[start..new_len], self.storage[end..old_len]);
-        const location = validateAndLocate(
-            self.storage[0..new_len],
-            start,
-            .backward,
-            self.width_profile,
-        ) catch {
-            std.mem.copyBackwards(u8, self.storage[end..old_len], self.storage[start..new_len]);
-            @memcpy(self.storage[start..end], removed[0..removed_len]);
-            return false;
-        };
-
-        self.len = new_len;
-        self.cursor = location.cursor;
-        self.previous_boundary = location.previous;
-        self.next_boundary = location.next;
-        self.display_width = location.total_width;
-        self.cursor_column = location.cursor_width;
-        self.anchor = null;
-        self.measured_profile = self.width_profile;
-        self.view_start = 0;
-        self.view_column = 0;
-        return true;
     }
 
     fn handlePasteChunk(self: *TextInput, chunk: []const u8) Update {
         if (!self.paste_active) return .ignored;
         if (self.paste_blocked) return .handled;
         var changed = false;
-        if (slicesOverlap(self.storage, chunk)) {
+        if (edit_core.slicesOverlap(self.storage, chunk)) {
             self.paste_blocked = true;
             self.recordFailure(error.OverlappingInput);
             return .handled;
@@ -574,12 +562,17 @@ pub const TextInput = struct {
     fn insertPasteRun(self: *TextInput, bytes: []const u8, changed: *bool) void {
         if (bytes.len == 0 or self.paste_blocked) return;
         const selected_len = if (self.selection()) |selected| selected.end - selected.start else 0;
-        const prefix_len = utf8PrefixAtMost(bytes, self.storage.len - self.len + selected_len);
+        const prefix_len = edit_core.utf8PrefixAtMost(bytes, self.storage.len - self.len + selected_len);
         if (prefix_len != 0) switch (self.replace(bytes[0..prefix_len])) {
             .inserted => changed.* = true,
             .capacity => unreachable,
             .invalid => {
                 self.insertPasteScalars(bytes, changed);
+                return;
+            },
+            .history => {
+                self.paste_blocked = true;
+                self.recordFailure(error.HistoryCapacityExceeded);
                 return;
             },
             .empty, .overlapping => unreachable,
@@ -664,6 +657,11 @@ pub const TextInput = struct {
                 self.recordFailure(error.OverlappingInput);
                 break :overlapping false;
             },
+            .history => history: {
+                self.paste_blocked = true;
+                self.recordFailure(error.HistoryCapacityExceeded);
+                break :history false;
+            },
             .empty => false,
         };
     }
@@ -684,7 +682,19 @@ pub const TextInput = struct {
                 self.recordFailure(error.OverlappingInput);
                 break :failed .handled;
             },
+            .history => failed: {
+                self.recordFailure(error.HistoryCapacityExceeded);
+                break :failed .handled;
+            },
         };
+    }
+
+    fn historyUpdate(self: *TextInput, result: EditError!bool) Update {
+        const changed = result catch |failure| {
+            self.recordFailure(failure);
+            return .handled;
+        };
+        return if (changed) .redraw else .handled;
     }
 
     fn recordFailure(self: *TextInput, failure: EditError) void {
@@ -692,6 +702,7 @@ pub const TextInput = struct {
     }
 
     fn resetPaste(self: *TextInput) void {
+        if (self.paste_active) if (self.history) |history| history.endTransaction();
         self.paste_tail_len = 0;
         self.paste_expected = 0;
         self.paste_active = false;
@@ -753,6 +764,7 @@ const InsertResult = enum {
     capacity,
     invalid,
     overlapping,
+    history,
     empty,
 };
 
@@ -878,45 +890,19 @@ fn clusterAt(value: []const u8, start: usize, width_profile: text.WidthProfile) 
 }
 
 fn nextBoundary(value: []const u8, start: usize) usize {
-    return if (clusterAt(value, start, .narrow)) |cluster| cluster.end else start;
+    return edit_core.nextBoundary(value, start, 0, value.len);
 }
 
 fn previousBoundary(value: []const u8, end: usize) usize {
-    if (end == 0) return 0;
-    var clusters = text.GraphemeIterator.init(value) catch unreachable;
-    var previous: usize = 0;
-    while (clusters.next()) |_| {
-        if (clusters.index >= end) return previous;
-        previous = clusters.index;
-    }
-    return previous;
+    return edit_core.previousBoundary(value, end, 0, value.len);
 }
 
 fn isBoundary(value: []const u8, offset: usize) bool {
-    if (offset > value.len) return false;
-    if (offset == 0 or offset == value.len) return true;
-    if (value[offset - 1] < 0x80 and value[offset] < 0x80) return true;
-    var clusters = text.GraphemeIterator.init(value) catch unreachable;
-    while (clusters.next()) |_| {
-        if (clusters.index == offset) return true;
-        if (clusters.index > offset) return false;
-    }
-    return false;
+    return edit_core.isBoundary(value, offset, 0, value.len);
 }
 
-fn slicesOverlap(storage: []const u8, bytes: []const u8) bool {
-    if (storage.len == 0 or bytes.len == 0) return false;
-    const storage_start = @intFromPtr(storage.ptr);
-    const bytes_start = @intFromPtr(bytes.ptr);
-    const storage_end = std.math.add(usize, storage_start, storage.len) catch return true;
-    const bytes_end = std.math.add(usize, bytes_start, bytes.len) catch return true;
-    return storage_start < bytes_end and bytes_start < storage_end;
-}
-
-fn asciiInsertionIsSafe(value: []const u8, cursor: usize, bytes: []const u8) bool {
-    for (bytes) |byte| if (byte < 0x20 or byte > 0x7e) return false;
-    return (cursor == 0 or value[cursor - 1] < 0x80) and
-        (cursor == value.len or value[cursor] < 0x80);
+fn rollbackInsertion(storage: []u8, old_len: usize, start: usize, inserted_len: usize) void {
+    std.mem.copyForwards(u8, storage[start..old_len], storage[start + inserted_len .. old_len + inserted_len]);
 }
 
 fn asciiReplacementIsSafe(value: []const u8, start: usize, end: usize, bytes: []const u8) bool {
@@ -984,16 +970,6 @@ fn validateTextCluster(cluster: text.Grapheme) error{InvalidText}!void {
     if (cluster.bytes.len > text.max_grapheme_bytes) return error.InvalidText;
     const width = cluster.displayWidthAssumeValid(.narrow) catch return error.InvalidText;
     if (width == 0) return error.InvalidText;
-}
-
-fn utf8PrefixAtMost(value: []const u8, maximum: usize) usize {
-    var end = @min(value.len, maximum);
-    while (end != 0 and end < value.len and value[end] & 0xc0 == 0x80) end -= 1;
-    return end;
-}
-
-inline fn hasTextModifiers(modifiers: input.Modifiers) bool {
-    return modifiers.alt or modifiers.control or modifiers.super or modifiers.hyper or modifiers.meta;
 }
 
 test "text input validates storage and edits by grapheme boundary" {
@@ -1200,4 +1176,43 @@ test "text input draws a grapheme-safe viewport and visual caret without allocat
     try std.testing.expectEqual(renderer.desiredCell(.{ .x = 1, .y = 3 }).?.style, renderer.desiredCell(.{ .x = 2, .y = 3 }).?.style);
     try std.testing.expectEqual(renderer.desiredCell(.{ .x = 0, .y = 3 }).?.style, renderer.desiredCell(.{ .x = 3, .y = 3 }).?.style);
     try std.testing.expect(!allocator_state.has_induced_failure);
+}
+
+test "text input undo and redo preserve directional selections" {
+    var storage: [32]u8 = undefined;
+    var records: [8]history_module.Record = undefined;
+    var history_bytes: [64]u8 = undefined;
+    var history = history_module.History.init(&records, &history_bytes, .reject);
+    var field = try TextInput.init(&storage, "one");
+    field.setHistory(&history);
+
+    try std.testing.expect(try field.setSelection(3, 0));
+    try std.testing.expect(try field.replaceSelection("two"));
+    try std.testing.expectEqualStrings("two", field.value());
+    try std.testing.expect(field.canUndo());
+    try std.testing.expectEqual(Update.redraw, field.applyAction(.undo));
+    try std.testing.expectEqualStrings("one", field.value());
+    try std.testing.expectEqual(@as(usize, 0), field.cursor);
+    try std.testing.expectEqual(@as(?usize, 3), field.anchor);
+    try std.testing.expectEqual(Update.redraw, field.applyAction(.redo));
+    try std.testing.expectEqualStrings("two", field.value());
+}
+
+test "text input groups fragmented paste into one undo transaction" {
+    var storage: [32]u8 = undefined;
+    var records: [8]history_module.Record = undefined;
+    var history_bytes: [64]u8 = undefined;
+    var history = history_module.History.init(&records, &history_bytes, .evict_oldest);
+    var field = try TextInput.init(&storage, "");
+    field.setHistory(&history);
+
+    try std.testing.expectEqual(Update.handled, field.handle(.paste_start));
+    try std.testing.expectEqual(Update.redraw, field.handle(.{ .paste_chunk = "ab" }));
+    try std.testing.expectEqual(Update.redraw, field.handle(.{ .paste_chunk = "cd" }));
+    try std.testing.expectEqual(Update.handled, field.handle(.paste_end));
+    try std.testing.expectEqualStrings("abcd", field.value());
+    try std.testing.expect(try field.undo());
+    try std.testing.expectEqualStrings("", field.value());
+    try std.testing.expect(try field.redo());
+    try std.testing.expectEqualStrings("abcd", field.value());
 }

@@ -3,11 +3,28 @@
 const std = @import("std");
 const grapheme = @import("text/grapheme.zig");
 const input = @import("input/event.zig");
+const edit_core = @import("editor/core.zig");
+const actions = @import("editor/actions.zig");
+const history_module = @import("editor/history.zig");
+const input_history = @import("editor/input_history.zig");
+const controllers = @import("editor/controllers.zig");
 
-pub const Selection = struct {
-    start: usize,
-    end: usize,
-};
+pub const Selection = edit_core.Selection;
+pub const Action = actions.Action;
+pub const ActionMode = actions.Mode;
+pub const defaultAction = actions.defaultAction;
+pub const History = history_module.History;
+pub const HistoryRecord = history_module.Record;
+pub const HistoryPolicy = history_module.Policy;
+pub const HistoryError = history_module.Error;
+pub const InputHistory = input_history.InputHistory;
+pub const InputHistoryEntry = input_history.Entry;
+pub const InputHistoryError = input_history.Error;
+pub const Completion = controllers.Completion;
+pub const CompletionOptions = controllers.CompletionOptions;
+pub const Search = controllers.Search;
+pub const SearchMatch = controllers.Match;
+pub const SearchOptions = controllers.SearchOptions;
 
 pub const Position = struct {
     row: usize,
@@ -49,6 +66,7 @@ pub const EditError = error{
     InvalidText,
     InvalidBoundary,
     OverlappingInput,
+    HistoryCapacityExceeded,
 };
 
 pub const EventStatus = enum {
@@ -87,6 +105,7 @@ pub const Model = struct {
     paste_active: bool = false,
     paste_blocked: bool = false,
     paste_pending_cr: bool = false,
+    history: ?*History = null,
 
     /// Caller storage is the hard memory and adversarial-input work bound.
     pub fn init(storage: []u8, initial: []const u8) InitError!Model {
@@ -114,22 +133,27 @@ pub const Model = struct {
     }
 
     pub fn line(self: *const Model, row: usize) ?[]const u8 {
-        const bounds = lineBoundsByRow(self.value(), row) orelse return null;
+        const bounds = self.lineBounds(row) orelse return null;
         return self.value()[bounds.start..bounds.end];
     }
 
     pub fn lineRange(self: *const Model, row: usize) ?Selection {
-        const bounds = lineBoundsByRow(self.value(), row) orelse return null;
+        const bounds = self.lineBounds(row) orelse return null;
         return .{ .start = bounds.start, .end = bounds.end };
     }
 
+    fn lineBounds(self: *const Model, row: usize) ?LineBounds {
+        if (row >= self.line_count) return null;
+        if (row <= self.cursor_row and self.cursor_row - row <= row + 1 or
+            row > self.cursor_row and row - self.cursor_row <= self.line_count - row)
+        {
+            return lineBoundsFromAnchor(self.value(), row, self.cursor_row, self.cursor);
+        }
+        return lineBoundsByRow(self.value(), row);
+    }
+
     pub fn selection(self: *const Model) ?Selection {
-        const anchor = self.anchor orelse return null;
-        if (anchor == self.cursor) return null;
-        return .{
-            .start = @min(anchor, self.cursor),
-            .end = @max(anchor, self.cursor),
-        };
+        return edit_core.selection(self.anchor, self.cursor);
     }
 
     pub fn selectedText(self: *const Model) ?[]const u8 {
@@ -248,74 +272,123 @@ pub const Model = struct {
         return self.replaceRange(selected.start, selected.end, replacement);
     }
 
+    pub fn setHistory(self: *Model, history: ?*History) void {
+        self.resetPaste();
+        if (history) |history_ptr| history_ptr.clear();
+        self.history = history;
+    }
+
+    pub fn canUndo(self: *const Model) bool {
+        return if (self.history) |history_ptr| history_ptr.canUndo() else false;
+    }
+
+    pub fn canRedo(self: *const Model) bool {
+        return if (self.history) |history_ptr| history_ptr.canRedo() else false;
+    }
+
+    pub fn undo(self: *Model) EditError!bool {
+        const history = self.history orelse return false;
+        const first = history.peekUndo() orelse return false;
+        const transaction = first.transaction;
+        while (history.peekUndo()) |edit| {
+            if (edit.transaction != transaction) break;
+            _ = try self.replaceRangeInternal(edit.start, edit.start + edit.inserted.len, edit.removed, false);
+            _ = try self.setSelection(edit.before.anchor orelse edit.before.cursor, edit.before.cursor);
+            history.commitUndo();
+        }
+        return true;
+    }
+
+    pub fn redo(self: *Model) EditError!bool {
+        const history = self.history orelse return false;
+        const first = history.peekRedo() orelse return false;
+        const transaction = first.transaction;
+        while (history.peekRedo()) |edit| {
+            if (edit.transaction != transaction) break;
+            _ = try self.replaceRangeInternal(edit.start, edit.start + edit.removed.len, edit.inserted, false);
+            _ = try self.setSelection(edit.after.anchor orelse edit.after.cursor, edit.after.cursor);
+            history.commitRedo();
+        }
+        return true;
+    }
+
     pub fn handle(self: *Model, event: input.Event) EventResult {
         return switch (event) {
-            .key => |key| self.handleKey(key),
-            .text => |bytes| editResult(self.replaceSelection(bytes)),
             .paste_start => result: {
                 self.resetPaste();
                 self.paste_active = true;
+                if (self.history) |history| history.beginTransaction();
                 break :result .{ .status = .handled };
             },
             .paste_chunk => |bytes| self.handlePasteChunk(bytes),
             .paste_end => self.finishPaste(),
             .malformed => self.abortPaste(),
-            else => .{ .status = .ignored },
+            else => if (actions.applyDefault(self, event, .multiline)) |result|
+                result
+            else
+                .{ .status = .ignored },
         };
     }
 
-    fn handleKey(self: *Model, key: input.Key) EventResult {
-        if (key.action == .release) return .{ .status = .ignored };
-        const extend = key.modifiers.shift;
-        switch (key.code) {
-            .left, .right, .up, .down, .home, .end, .page_up, .page_down => {
-                if (hasUnsupportedModifiers(key.modifiers)) return .{ .status = .ignored };
-                const changed = switch (key.code) {
-                    .left => self.moveLeft(extend),
-                    .right => self.moveRight(extend),
-                    .up => self.moveVertical(-1, extend),
-                    .down => self.moveVertical(1, extend),
-                    .home => self.moveHome(extend),
-                    .end => self.moveEnd(extend),
-                    .page_up => self.moveVerticalRows(true, pageRows(self.viewport.height), extend),
-                    .page_down => self.moveVerticalRows(false, pageRows(self.viewport.height), extend),
-                    else => unreachable,
-                };
-                return .{ .status = if (changed) .redraw else .handled };
-            },
-            .backspace => {
-                if (hasUnsupportedModifiers(key.modifiers)) return .{ .status = .ignored };
+    pub inline fn applyAction(self: *Model, action: Action) EventResult {
+        const changed = switch (action) {
+            .move_left => |extend| self.moveLeft(extend),
+            .move_right => |extend| self.moveRight(extend),
+            .move_up => |extend| self.moveVertical(-1, extend),
+            .move_down => |extend| self.moveVertical(1, extend),
+            .move_home => |extend| self.moveHome(extend),
+            .move_end => |extend| self.moveEnd(extend),
+            .page_up => |extend| self.moveVerticalRows(true, pageRows(self.viewport.height), extend),
+            .page_down => |extend| self.moveVerticalRows(false, pageRows(self.viewport.height), extend),
+            .move_word_left => |extend| self.moveTo(actions.previousWordStart(self.value(), self.cursor), extend, false),
+            .move_word_right => |extend| self.moveTo(actions.nextWordEnd(self.value(), self.cursor), extend, false),
+            .delete_backward => {
                 if (self.selection() != null) return editResult(self.replaceSelection(""));
                 const start = previousBoundary(self.value(), self.cursor);
                 if (start == self.cursor) return .{ .status = .handled };
                 return editResult(self.replaceRange(start, self.cursor, ""));
             },
-            .delete => {
-                if (hasUnsupportedModifiers(key.modifiers)) return .{ .status = .ignored };
+            .delete_forward => {
                 if (self.selection() != null) return editResult(self.replaceSelection(""));
                 const end = nextBoundary(self.value(), self.cursor);
                 if (end == self.cursor) return .{ .status = .handled };
                 return editResult(self.replaceRange(self.cursor, end, ""));
             },
-            .enter => {
-                if (hasUnsupportedModifiers(key.modifiers)) return .{ .status = .ignored };
-                return editResult(self.replaceSelection("\n"));
+            .delete_word_backward => {
+                if (self.selection() != null) return editResult(self.replaceSelection(""));
+                const start = actions.previousWordStart(self.value(), self.cursor);
+                if (start == self.cursor) return .{ .status = .handled };
+                return editResult(self.replaceRange(start, self.cursor, ""));
             },
-            .codepoint => |codepoint| {
-                if (hasUnsupportedModifiers(key.modifiers)) return .{ .status = .ignored };
+            .delete_word_forward => {
+                if (self.selection() != null) return editResult(self.replaceSelection(""));
+                const end = actions.nextWordEnd(self.value(), self.cursor);
+                if (end == self.cursor) return .{ .status = .handled };
+                return editResult(self.replaceRange(self.cursor, end, ""));
+            },
+            .insert_codepoint => |codepoint| {
                 var encoded: [4]u8 = undefined;
                 const encoded_len = std.unicode.utf8Encode(codepoint, &encoded) catch {
                     return .{ .status = .handled, .failure = error.InvalidText };
                 };
                 return editResult(self.replaceSelection(encoded[0..encoded_len]));
             },
-            else => return .{ .status = .ignored },
-        }
+            .insert_text => |bytes| return editResult(self.replaceSelection(bytes)),
+            .insert_newline => return editResult(self.replaceSelection("\n")),
+            .select_all => self.selectAll(),
+            .undo => return editResult(self.undo()),
+            .redo => return editResult(self.redo()),
+        };
+        return .{ .status = if (changed) .redraw else .handled };
     }
 
     fn replaceRange(self: *Model, start: usize, end: usize, replacement: []const u8) EditError!bool {
+        return self.replaceRangeInternal(start, end, replacement, true);
+    }
+
+    fn replaceRangeInternal(self: *Model, start: usize, end: usize, replacement: []const u8, record_history: bool) EditError!bool {
         std.debug.assert(start <= end and end <= self.len);
-        if (replacement.len != 0 and slicesOverlap(self.storage, replacement)) return error.OverlappingInput;
+        if (replacement.len != 0 and edit_core.slicesOverlap(self.storage, replacement)) return error.OverlappingInput;
         const current = self.value();
         if (!asciiEditIsSafe(current, start, end, replacement)) {
             const left = lineRangeAtOffset(current, start);
@@ -330,23 +403,26 @@ pub const Model = struct {
         if (replacement.len > self.storage.len - retained_len) return error.CapacityExceeded;
         if (start == end and replacement.len == 0) return false;
 
+        const history_index = if (record_history) history: {
+            const history_ptr = self.history orelse break :history null;
+            break :history history_ptr.record(
+                start,
+                self.storage[start..end],
+                replacement,
+                .{ .cursor = self.cursor, .anchor = self.anchor },
+            ) catch return error.HistoryCapacityExceeded;
+        } else null;
+
         const start_position = self.editStartPosition(start, end);
         const replacement_position = advancePosition(start_position, replacement, self.width_profile);
         const ascii_position_safe = isAsciiWithoutNewline(replacement) and
             (start == 0 or self.storage[start - 1] < 0x80);
         const removed_newlines = countNewlines(self.storage[start..end]);
         const added_newlines = countNewlines(replacement);
-        const old_len = self.len;
-        const tail_len = old_len - end;
-        const target_tail = start + replacement.len;
-        const new_len = retained_len + replacement.len;
-        if (target_tail < end) {
-            std.mem.copyForwards(u8, self.storage[target_tail .. target_tail + tail_len], self.storage[end..old_len]);
-        } else if (target_tail > end) {
-            std.mem.copyBackwards(u8, self.storage[target_tail .. target_tail + tail_len], self.storage[end..old_len]);
-        }
-        @memcpy(self.storage[start..target_tail], replacement);
-        self.len = new_len;
+        const splice = edit_core.splice(self.storage, self.len, start, end, replacement);
+        const target_tail = splice.target;
+        const new_len = splice.new_len;
+        self.len = splice.new_len;
         const target_cursor = snapBoundary(
             self.storage[0..new_len],
             target_tail,
@@ -367,6 +443,7 @@ pub const Model = struct {
         self.preferred_column = null;
         self.revision +%= 1;
         self.revealCursor();
+        if (history_index) |index| self.history.?.finish(index, .{ .cursor = self.cursor, .anchor = self.anchor });
         return true;
     }
 
@@ -634,7 +711,7 @@ pub const Model = struct {
         if (!self.paste_active) return .{ .status = .ignored };
         if (self.paste_blocked) return .{ .status = .handled };
         var changed = false;
-        if (slicesOverlap(self.storage, bytes)) {
+        if (edit_core.slicesOverlap(self.storage, bytes)) {
             return self.failPaste(false, error.OverlappingInput);
         }
 
@@ -717,7 +794,7 @@ pub const Model = struct {
         if (bytes.len == 0) return null;
         const selected_len = if (self.selection()) |selected| selected.end - selected.start else 0;
         const available = self.storage.len - (self.len - selected_len);
-        const prefix_len = utf8PrefixAtMost(bytes, available);
+        const prefix_len = edit_core.utf8PrefixAtMost(bytes, available);
         if (prefix_len != 0) {
             changed.* = (self.replaceSelection(bytes[0..prefix_len]) catch |err| return err) or changed.*;
         }
@@ -746,6 +823,7 @@ pub const Model = struct {
     }
 
     fn resetPaste(self: *Model) void {
+        if (self.paste_active) if (self.history) |history| history.endTransaction();
         self.paste_tail_len = 0;
         self.paste_expected = 0;
         self.paste_active = false;
@@ -880,19 +958,42 @@ fn lineBoundsByRow(value: []const u8, target_row: usize) ?LineBounds {
     return if (row == target_row) .{ .row = row, .start = start, .end = value.len } else null;
 }
 
+fn lineBoundsFromAnchor(value: []const u8, target_row: usize, anchor_row: usize, anchor_offset: usize) ?LineBounds {
+    const anchor = lineRangeAtOffset(value, anchor_offset);
+    if (target_row == anchor_row) return .{ .row = target_row, .start = anchor.start, .end = anchor.end };
+    if (target_row > anchor_row) {
+        var row = anchor_row;
+        var start = anchor.end;
+        while (row < target_row) {
+            if (start == value.len) return null;
+            start += 1;
+            row += 1;
+            const relative_end = std.mem.indexOfScalar(u8, value[start..], '\n') orelse value.len - start;
+            if (row == target_row) return .{ .row = row, .start = start, .end = start + relative_end };
+            start += relative_end;
+        }
+        unreachable;
+    }
+
+    if (anchor.start == 0) return null;
+    var row = anchor_row - 1;
+    var end = anchor.start - 1;
+    var index = end;
+    while (index != 0) {
+        index -= 1;
+        if (value[index] != '\n') continue;
+        if (row == target_row) return .{ .row = row, .start = index + 1, .end = end };
+        row -= 1;
+        end = index;
+    }
+    return if (row == target_row) .{ .row = row, .start = 0, .end = end } else null;
+}
+
 fn previousBoundary(value: []const u8, cursor: usize) usize {
     if (cursor == 0) return 0;
     if (value[cursor - 1] < 0x80 and (cursor == 1 or value[cursor - 2] < 0x80)) return cursor - 1;
     const bounds = lineRangeAtOffset(value, cursor);
-    if (cursor == bounds.start) return cursor - 1;
-    var previous = bounds.start;
-    var iterator = grapheme.Iterator.init(value[bounds.start..bounds.end]) catch unreachable;
-    while (iterator.next()) |cluster| {
-        const end = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(value.ptr) + cluster.bytes.len;
-        if (end >= cursor) return previous;
-        previous = end;
-    }
-    return previous;
+    return edit_core.previousBoundary(value, cursor, bounds.start, bounds.end);
 }
 
 fn nextBoundary(value: []const u8, cursor: usize) usize {
@@ -900,27 +1001,15 @@ fn nextBoundary(value: []const u8, cursor: usize) usize {
     if (value[cursor] == '\n') return cursor + 1;
     if (value[cursor] < 0x80 and (cursor + 1 == value.len or value[cursor + 1] < 0x80)) return cursor + 1;
     const bounds = lineRangeAtOffset(value, cursor);
-    if (cursor == bounds.end) return cursor + 1;
-    var iterator = grapheme.Iterator.init(value[bounds.start..bounds.end]) catch unreachable;
-    while (iterator.next()) |cluster| {
-        const start = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(value.ptr);
-        if (start == cursor) return start + cluster.bytes.len;
-    }
-    unreachable;
+    return edit_core.nextBoundary(value, cursor, bounds.start, bounds.end);
 }
 
 fn isBoundary(value: []const u8, offset: usize) bool {
     if (offset > value.len) return false;
     if (offset == 0 or offset == value.len) return true;
+    if (value[offset - 1] < 0x80 and value[offset] < 0x80) return true;
     const bounds = lineRangeAtOffset(value, offset);
-    if (offset == bounds.start or offset == bounds.end) return true;
-    var iterator = grapheme.Iterator.init(value[bounds.start..bounds.end]) catch unreachable;
-    while (iterator.next()) |cluster| {
-        const end = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(value.ptr) + cluster.bytes.len;
-        if (end == offset) return true;
-        if (end > offset) return false;
-    }
-    return false;
+    return edit_core.isBoundary(value, offset, bounds.start, bounds.end);
 }
 
 const SnapDirection = enum { backward, forward };
@@ -1119,28 +1208,9 @@ fn validateStoredCluster(cluster: grapheme.Cluster) error{InvalidText}!void {
     if (width == 0) return error.InvalidText;
 }
 
-fn utf8PrefixAtMost(value: []const u8, maximum: usize) usize {
-    var end = @min(value.len, maximum);
-    while (end != 0 and end < value.len and value[end] & 0xc0 == 0x80) end -= 1;
-    return end;
-}
-
-fn hasUnsupportedModifiers(modifiers: input.Modifiers) bool {
-    return modifiers.alt or modifiers.control or modifiers.super or modifiers.hyper or modifiers.meta;
-}
-
 fn editResult(result: EditError!bool) EventResult {
     const changed = result catch |err| return .{ .status = .handled, .failure = err };
     return .{ .status = if (changed) .redraw else .handled };
-}
-
-fn slicesOverlap(storage: []const u8, source: []const u8) bool {
-    if (storage.len == 0 or source.len == 0) return false;
-    const storage_start = @intFromPtr(storage.ptr);
-    const source_start = @intFromPtr(source.ptr);
-    const storage_end = std.math.add(usize, storage_start, storage.len) catch return true;
-    const source_end = std.math.add(usize, source_start, source.len) catch return true;
-    return source_start < storage_end and storage_start < source_end;
 }
 
 fn expectModelInvariants(editor: *const Model) !void {
@@ -1408,4 +1478,58 @@ test "multiline editor snaps edits that merge graphemes across a seam" {
     try std.testing.expectEqual(@as(usize, 11), editor.cursor);
     try std.testing.expectEqual(Position{ .row = 0, .column = 2 }, editor.cursorPosition());
     try expectModelInvariants(&editor);
+}
+
+test "multiline editor undo and redo restore text and directional selection" {
+    var storage: [32]u8 = undefined;
+    var records: [8]HistoryRecord = undefined;
+    var history_bytes: [64]u8 = undefined;
+    var history = History.init(&records, &history_bytes, .reject);
+    var editor = try Model.init(&storage, "one");
+    editor.setHistory(&history);
+
+    try std.testing.expect(try editor.setSelection(3, 0));
+    try std.testing.expect(try editor.replaceSelection("two"));
+    try std.testing.expectEqualStrings("two", editor.value());
+    try std.testing.expect(editor.canUndo());
+
+    try std.testing.expect(try editor.undo());
+    try std.testing.expectEqualStrings("one", editor.value());
+    try std.testing.expectEqual(@as(usize, 0), editor.cursor);
+    try std.testing.expectEqual(@as(?usize, 3), editor.anchor);
+    try std.testing.expect(try editor.redo());
+    try std.testing.expectEqualStrings("two", editor.value());
+    try std.testing.expectEqual(@as(?Selection, null), editor.selection());
+}
+
+test "multiline editor groups fragmented paste into one undo transaction" {
+    var storage: [32]u8 = undefined;
+    var records: [8]HistoryRecord = undefined;
+    var history_bytes: [64]u8 = undefined;
+    var history = History.init(&records, &history_bytes, .evict_oldest);
+    var editor = try Model.init(&storage, "");
+    editor.setHistory(&history);
+
+    try std.testing.expectEqual(EventStatus.handled, editor.handle(.paste_start).status);
+    try std.testing.expectEqual(EventStatus.redraw, editor.handle(.{ .paste_chunk = "ab" }).status);
+    try std.testing.expectEqual(EventStatus.redraw, editor.handle(.{ .paste_chunk = "cd" }).status);
+    try std.testing.expectEqual(EventStatus.handled, editor.handle(.paste_end).status);
+    try std.testing.expectEqualStrings("abcd", editor.value());
+    try std.testing.expect(try editor.undo());
+    try std.testing.expectEqualStrings("", editor.value());
+    try std.testing.expect(try editor.redo());
+    try std.testing.expectEqualStrings("abcd", editor.value());
+}
+
+test "multiline editor rejects an edit when required history cannot fit" {
+    var storage: [16]u8 = undefined;
+    var records: [1]HistoryRecord = undefined;
+    var history_bytes: [2]u8 = undefined;
+    var history = History.init(&records, &history_bytes, .reject);
+    var editor = try Model.init(&storage, "");
+    editor.setHistory(&history);
+
+    try std.testing.expectError(error.HistoryCapacityExceeded, editor.replaceSelection("long"));
+    try std.testing.expectEqualStrings("", editor.value());
+    try std.testing.expect(!editor.canUndo());
 }

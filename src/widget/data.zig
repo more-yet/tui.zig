@@ -37,6 +37,240 @@ pub const Column = struct {
     options: text.LineOptions = .{ .overflow = .ellipsis },
 };
 
+pub const TreeState = struct {
+    scroll: ScrollState = .{},
+    toggled: ?usize = null,
+    activated: ?usize = null,
+
+    pub fn takeToggle(self: *TreeState) ?usize {
+        const toggled = self.toggled;
+        self.toggled = null;
+        return toggled;
+    }
+
+    pub fn takeActivation(self: *TreeState) ?usize {
+        const activated = self.activated;
+        self.activated = null;
+        return activated;
+    }
+};
+
+/// A flattened visible tree. The provider owns expansion and supplies
+/// `count`, `row`, `depth`, `hasChildren`, and `expanded`.
+pub fn Tree(comptime Provider: type) type {
+    return struct {
+        provider: *Provider,
+        state: *TreeState,
+        bounds: render.Rect,
+        row_role: theme.Role = .{},
+        selected_role: theme.Role = .{},
+        enabled: bool = true,
+        focused: bool = false,
+        width_profile: text.WidthProfile = .narrow,
+
+        const Self = @This();
+
+        pub fn handle(self: *Self, event: input.Event) Update {
+            const count = self.provider.count();
+            self.state.scroll.normalize(count, self.bounds.height);
+            if (!self.enabled) return .ignored;
+            if (event == .key) {
+                const key = event.key;
+                if (key.action != .release and !key.modifiers.hasNonLock()) switch (key.code) {
+                    .left => return self.moveLeft(),
+                    .right => return self.moveRight(),
+                    .enter => return self.activate(),
+                    .codepoint => |codepoint| if (codepoint == ' ') return self.toggle(),
+                    else => {},
+                };
+            }
+            return handleView(&self.state.scroll, count, self.bounds.height, self.bounds, 0, event);
+        }
+
+        pub fn draw(self: *Self, surface: *render.Surface) !void {
+            const size = surface.size();
+            const count = self.provider.count();
+            self.state.scroll.normalize(count, size.height);
+            var y: u16 = 0;
+            while (y < size.height) : (y += 1) {
+                const index = if (@as(usize, y) < count -| self.state.scroll.top)
+                    self.state.scroll.top + y
+                else
+                    null;
+                const style = rowStyle(
+                    self.row_role,
+                    self.selected_role,
+                    self.enabled,
+                    self.focused,
+                    if (index) |row| self.state.scroll.selected == row else false,
+                );
+                try surface.fill(.{ .x = 0, .y = y, .width = size.width, .height = 1 }, style);
+                const row = index orelse continue;
+                const indent = @min(self.provider.depth(row), @as(usize, size.width) / 2) * 2;
+                if (indent >= size.width) continue;
+                const marker = if (!self.provider.hasChildren(row))
+                    "  "
+                else if (self.provider.expanded(row))
+                    "v "
+                else
+                    "> ";
+                const marker_width = @min(@as(u16, 2), size.width - @as(u16, @intCast(indent)));
+                _ = try surface.putTextLine(
+                    .{ .x = @intCast(indent), .y = y },
+                    marker,
+                    marker_width,
+                    style,
+                    self.width_profile,
+                    .{},
+                );
+                const text_x = @as(u16, @intCast(indent)) + marker_width;
+                if (text_x < size.width) _ = try surface.putTextLine(
+                    .{ .x = text_x, .y = y },
+                    self.provider.row(row),
+                    size.width - text_x,
+                    style,
+                    self.width_profile,
+                    .{ .overflow = .ellipsis },
+                );
+            }
+        }
+
+        fn activate(self: *Self) Update {
+            const selected = self.state.scroll.selected orelse return .handled;
+            self.state.activated = selected;
+            return .handled;
+        }
+
+        fn toggle(self: *Self) Update {
+            const selected = self.state.scroll.selected orelse return .handled;
+            if (self.provider.hasChildren(selected)) self.state.toggled = selected;
+            return .handled;
+        }
+
+        fn moveLeft(self: *Self) Update {
+            const selected = self.state.scroll.selected orelse return .handled;
+            if (self.provider.hasChildren(selected) and self.provider.expanded(selected)) return self.toggle();
+            const depth = self.provider.depth(selected);
+            if (depth == 0) return .handled;
+            var index = selected;
+            while (index != 0) {
+                index -= 1;
+                if (self.provider.depth(index) < depth) {
+                    self.state.scroll.selected = index;
+                    self.state.scroll.reveal(self.provider.count(), self.bounds.height);
+                    return .redraw;
+                }
+            }
+            return .handled;
+        }
+
+        fn moveRight(self: *Self) Update {
+            const selected = self.state.scroll.selected orelse return .handled;
+            if (!self.provider.hasChildren(selected)) return .handled;
+            if (!self.provider.expanded(selected)) return self.toggle();
+            const child = selected + 1;
+            if (child < self.provider.count() and self.provider.depth(child) > self.provider.depth(selected)) {
+                self.state.scroll.selected = child;
+                self.state.scroll.reveal(self.provider.count(), self.bounds.height);
+                return .redraw;
+            }
+            return .handled;
+        }
+    };
+}
+
+pub const TaskStatus = enum {
+    pending,
+    running,
+    succeeded,
+    failed,
+    cancelled,
+};
+
+pub const TaskListState = struct {
+    scroll: ScrollState = .{},
+    activated: ?usize = null,
+
+    pub fn takeActivation(self: *TaskListState) ?usize {
+        const activated = self.activated;
+        self.activated = null;
+        return activated;
+    }
+};
+
+/// A provider-backed task collection. The provider supplies `count`, `row`, and `status`.
+pub fn TaskList(comptime Provider: type) type {
+    return struct {
+        provider: *Provider,
+        state: *TaskListState,
+        bounds: render.Rect,
+        row_role: theme.Role = .{},
+        running_role: theme.Role = .{},
+        succeeded_role: theme.Role = .{},
+        failed_role: theme.Role = .{},
+        cancelled_role: theme.Role = .{},
+        selected_role: theme.Role = .{},
+        enabled: bool = true,
+        focused: bool = false,
+        width_profile: text.WidthProfile = .narrow,
+
+        const Self = @This();
+
+        pub fn handle(self: *Self, event: input.Event) Update {
+            const count = self.provider.count();
+            self.state.scroll.normalize(count, self.bounds.height);
+            if (!self.enabled) return .ignored;
+            if (keyboardActivation(event)) {
+                self.state.activated = self.state.scroll.selected;
+                return .handled;
+            }
+            return handleView(&self.state.scroll, count, self.bounds.height, self.bounds, 0, event);
+        }
+
+        pub fn draw(self: *Self, surface: *render.Surface) !void {
+            const size = surface.size();
+            const count = self.provider.count();
+            self.state.scroll.normalize(count, size.height);
+            var y: u16 = 0;
+            while (y < size.height) : (y += 1) {
+                const index = if (@as(usize, y) < count -| self.state.scroll.top)
+                    self.state.scroll.top + y
+                else
+                    null;
+                const selected = if (index) |row| self.state.scroll.selected == row else false;
+                const status = if (index) |row| self.provider.status(row) else TaskStatus.pending;
+                const role = switch (status) {
+                    .pending => self.row_role,
+                    .running => self.running_role,
+                    .succeeded => self.succeeded_role,
+                    .failed => self.failed_role,
+                    .cancelled => self.cancelled_role,
+                };
+                const style = rowStyle(role, self.selected_role, self.enabled, self.focused, selected);
+                try surface.fill(.{ .x = 0, .y = y, .width = size.width, .height = 1 }, style);
+                const row = index orelse continue;
+                const marker = switch (status) {
+                    .pending => "[ ] ",
+                    .running => "[~] ",
+                    .succeeded => "[x] ",
+                    .failed => "[!] ",
+                    .cancelled => "[-] ",
+                };
+                const marker_width = @min(@as(u16, 4), size.width);
+                _ = try surface.putTextLine(.{ .x = 0, .y = y }, marker, marker_width, style, self.width_profile, .{});
+                if (marker_width < size.width) _ = try surface.putTextLine(
+                    .{ .x = marker_width, .y = y },
+                    self.provider.row(row),
+                    size.width - marker_width,
+                    style,
+                    self.width_profile,
+                    .{ .overflow = .ellipsis },
+                );
+            }
+        }
+    };
+}
+
 pub fn List(comptime Provider: type) type {
     return struct {
         provider: *Provider,
@@ -261,6 +495,17 @@ fn maxTop(count: usize, visible_rows: u16) usize {
     return count -| visible_rows;
 }
 
+fn keyboardActivation(event: input.Event) bool {
+    return switch (event) {
+        .key => |key| key.action == .press and !key.modifiers.hasNonLock() and switch (key.code) {
+            .enter => true,
+            .codepoint => |codepoint| codepoint == ' ' or codepoint == '\r' or codepoint == '\n',
+            else => false,
+        },
+        else => false,
+    };
+}
+
 const std = @import("std");
 
 test "scroll state and list navigation remain bounded" {
@@ -397,4 +642,80 @@ test "table reserves its header and selects only body rows" {
         table.handle(.{ .mouse = .{ .x = 5, .y = 4, .button = .left, .action = .press } }),
     );
     try std.testing.expectEqual(@as(?usize, 1), state.selected);
+}
+
+test "tree emits expansion requests and navigates visible hierarchy" {
+    const Provider = struct {
+        labels: []const []const u8,
+        depths: []const usize,
+
+        pub fn count(self: *@This()) usize {
+            return self.labels.len;
+        }
+
+        pub fn row(self: *@This(), index: usize) []const u8 {
+            return self.labels[index];
+        }
+
+        pub fn depth(self: *@This(), index: usize) usize {
+            return self.depths[index];
+        }
+
+        pub fn hasChildren(_: *@This(), index: usize) bool {
+            return index == 0;
+        }
+
+        pub fn expanded(_: *@This(), index: usize) bool {
+            return index == 0;
+        }
+    };
+    const labels = [_][]const u8{ "root", "child", "peer" };
+    const depths = [_]usize{ 0, 1, 0 };
+    var provider = Provider{ .labels = &labels, .depths = &depths };
+    var state = TreeState{ .scroll = .{ .selected = 0 } };
+    var tree = Tree(Provider){
+        .provider = &provider,
+        .state = &state,
+        .bounds = .{ .x = 0, .y = 0, .width = 12, .height = 3 },
+    };
+    try std.testing.expectEqual(Update.redraw, tree.handle(.{ .key = .{ .code = .right } }));
+    try std.testing.expectEqual(@as(?usize, 1), state.scroll.selected);
+    try std.testing.expectEqual(Update.redraw, tree.handle(.{ .key = .{ .code = .left } }));
+    try std.testing.expectEqual(@as(?usize, 0), state.scroll.selected);
+    try std.testing.expectEqual(Update.handled, tree.handle(.{ .key = .{ .code = .left } }));
+    try std.testing.expectEqual(@as(?usize, 0), state.takeToggle());
+}
+
+test "task list pulls visible status and exposes activation" {
+    const Provider = struct {
+        pub fn count(_: *@This()) usize {
+            return 2;
+        }
+
+        pub fn row(_: *@This(), index: usize) []const u8 {
+            return if (index == 0) "compile" else "test";
+        }
+
+        pub fn status(_: *@This(), index: usize) TaskStatus {
+            return if (index == 0) .succeeded else .running;
+        }
+    };
+    var provider: Provider = .{};
+    var state = TaskListState{ .scroll = .{ .selected = 1 } };
+    var tasks = TaskList(Provider){
+        .provider = &provider,
+        .state = &state,
+        .bounds = .{ .x = 0, .y = 0, .width = 12, .height = 2 },
+    };
+    try std.testing.expectEqual(Update.handled, tasks.handle(.{ .key = .{ .code = .enter } }));
+    try std.testing.expectEqual(@as(?usize, 1), state.takeActivation());
+
+    var renderer = try render.Renderer.init(std.testing.allocator, .{ .width = 12, .height = 2 }, .{});
+    defer renderer.deinit();
+    var frame = renderer.frame();
+    var surface = frame.surface(render.Rect.fromSize(renderer.size()));
+    try tasks.draw(&surface);
+    var glyph: [text.max_grapheme_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("[", renderer.desiredCellView(.{ .x = 0, .y = 0 }, &glyph).?.glyph);
+    try std.testing.expectEqualStrings("~", renderer.desiredCellView(.{ .x = 1, .y = 1 }, &glyph).?.glyph);
 }

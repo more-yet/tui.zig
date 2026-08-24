@@ -26,6 +26,10 @@ pub const Parser = struct {
         osc_escape,
         discard_osc,
         discard_osc_escape,
+        apc,
+        apc_escape,
+        discard_apc,
+        discard_apc_escape,
         paste,
         utf8,
         alt_utf8,
@@ -127,6 +131,19 @@ pub const Parser = struct {
                     self.state = .discard_osc;
                 }
             },
+            .apc => self.consumeApc(byte),
+            .apc_escape => try self.consumeApcEscape(byte, sink),
+            .discard_apc => {
+                if (byte == 0x1B) self.state = .discard_apc_escape;
+            },
+            .discard_apc_escape => {
+                if (byte == '\\') {
+                    self.state = .ground;
+                    try sink.emit(.malformed);
+                } else if (byte != 0x1B) {
+                    self.state = .discard_apc;
+                }
+            },
             .paste => try self.consumePaste(byte, sink),
             .utf8, .alt_utf8 => try self.consumeUtf8(byte, sink),
         }
@@ -185,6 +202,11 @@ pub const Parser = struct {
             },
             ']' => {
                 self.state = .osc;
+                self.sequence_len = 0;
+                return;
+            },
+            '_' => {
+                self.state = .apc;
                 self.sequence_len = 0;
                 return;
             },
@@ -297,6 +319,39 @@ pub const Parser = struct {
         self.sequence[self.sequence_len + 1] = byte;
         self.sequence_len += 2;
         self.state = .osc;
+    }
+
+    fn consumeApc(self: *Parser, byte: u8) void {
+        if (byte == 0x1B) {
+            self.state = .apc_escape;
+            return;
+        }
+        if (self.sequence_len == self.sequence.len) {
+            self.state = .discard_apc;
+            return;
+        }
+        self.sequence[self.sequence_len] = byte;
+        self.sequence_len += 1;
+    }
+
+    fn consumeApcEscape(self: *Parser, byte: u8, sink: anytype) anyerror!void {
+        if (byte == '\\') {
+            self.state = .ground;
+            try sink.emit(.{ .terminal_reply = .{
+                .kind = .apc,
+                .final = byte,
+                .raw = self.sequence[0..self.sequence_len],
+            } });
+            return;
+        }
+        if (self.sequence_len + 2 > self.sequence.len) {
+            self.state = .discard_apc;
+            return;
+        }
+        self.sequence[self.sequence_len] = 0x1B;
+        self.sequence[self.sequence_len + 1] = byte;
+        self.sequence_len += 2;
+        self.state = .apc;
     }
 
     fn consumePaste(self: *Parser, byte: u8, sink: anytype) anyerror!void {
@@ -725,6 +780,29 @@ test "oversized OSC replies are rejected rather than truncated" {
     try std.testing.expectEqualStrings("x", collector.text[0..collector.text_len]);
 }
 
+test "APC replies are fragmented safely and oversized replies are rejected" {
+    const reply = "\x1b_Gi=31;OK\x1b\\";
+    var split: usize = 0;
+    while (split <= reply.len) : (split += 1) {
+        var parser: Parser = .{};
+        var collector: Collector = .{};
+        try parser.feed(reply[0..split], &collector);
+        try parser.feed(reply[split..], &collector);
+        try std.testing.expectEqual(@as(usize, 1), collector.terminal_replies);
+        try std.testing.expectEqual(.apc, collector.last_reply_kind.?);
+        try std.testing.expectEqualStrings("Gi=31;OK", collector.last_reply[0..collector.last_reply_len]);
+    }
+
+    var parser: Parser = .{};
+    var collector: Collector = .{};
+    const oversized: [128]u8 = @splat('a');
+    try parser.feed("\x1b_", &collector);
+    try parser.feed(&oversized, &collector);
+    try parser.feed("\x1b\\x", &collector);
+    try std.testing.expectEqual(@as(usize, 1), collector.malformed);
+    try std.testing.expectEqualStrings("x", collector.text[0..collector.text_len]);
+}
+
 test "mouse wheel events do not report a pressed button" {
     var parser: Parser = .{};
     var collector: Collector = .{};
@@ -872,6 +950,9 @@ const Collector = struct {
     malformed: usize = 0,
     cursor_positions: usize = 0,
     terminal_replies: usize = 0,
+    last_reply_kind: ?@FieldType(event.TerminalReply, "kind") = null,
+    last_reply: [Parser.max_terminal_reply_bytes]u8 = undefined,
+    last_reply_len: usize = 0,
     last_mouse: ?event.Mouse = null,
 
     fn emit(self: *Collector, value: event.Event) !void {
@@ -900,7 +981,12 @@ const Collector = struct {
             },
             .malformed => self.malformed += 1,
             .cursor_position => self.cursor_positions += 1,
-            .terminal_reply => self.terminal_replies += 1,
+            .terminal_reply => |reply| {
+                self.terminal_replies += 1;
+                self.last_reply_kind = reply.kind;
+                @memcpy(self.last_reply[0..reply.raw.len], reply.raw);
+                self.last_reply_len = reply.raw.len;
+            },
             .mouse => |mouse| self.last_mouse = mouse,
             else => {},
         }
