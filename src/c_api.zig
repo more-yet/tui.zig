@@ -16,6 +16,14 @@ const unsupported: i32 = -11;
 const event_payload_capacity = 256;
 const provider_batch_capacity = 64;
 
+const CAllocateFn = *const fn (?*anyopaque, u64, u64) callconv(.c) ?*anyopaque;
+const CDeallocateFn = *const fn (?*anyopaque, ?*anyopaque, u64, u64) callconv(.c) void;
+pub const CAllocator = extern struct {
+    context: ?*anyopaque,
+    allocate: ?CAllocateFn,
+    deallocate: ?CDeallocateFn,
+};
+
 pub const tui_renderer_v1 = opaque {};
 pub const tui_text_input_v1 = opaque {};
 pub const tui_text_area_v1 = opaque {};
@@ -179,15 +187,100 @@ pub const CTreeState = extern struct {
 const CSamplesReadFn = *const fn (?*anyopaque, u64, u32, [*c]f64) callconv(.c) i32;
 pub const CSamplesProvider = extern struct { context: ?*anyopaque, count: u64, read: ?CSamplesReadFn };
 
+const AllocatorBridge = struct {
+    callbacks: CAllocator,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocate,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = deallocate,
+    };
+
+    fn init(value: ?*const CAllocator) ?AllocatorBridge {
+        const callbacks = (value orelse return null).*;
+        if (callbacks.allocate == null or callbacks.deallocate == null) return null;
+        return .{ .callbacks = callbacks };
+    }
+
+    fn allocator(self: *AllocatorBridge) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn create(self: AllocatorBridge, comptime T: type) ?*T {
+        const pointer = self.allocateBytes(@sizeOf(T), @alignOf(T)) orelse return null;
+        return @ptrCast(@alignCast(pointer));
+    }
+
+    fn destroy(self: AllocatorBridge, pointer: anytype) void {
+        const T = @typeInfo(@TypeOf(pointer)).pointer.child;
+        self.callbacks.deallocate.?(
+            self.callbacks.context,
+            @ptrCast(pointer),
+            @sizeOf(T),
+            @alignOf(T),
+        );
+    }
+
+    fn allocate(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        _ = return_address;
+        const self: *AllocatorBridge = @ptrCast(@alignCast(context));
+        const pointer = self.allocateBytes(len, alignment.toByteUnits()) orelse return null;
+        return @ptrCast(pointer);
+    }
+
+    fn deallocate(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        _ = return_address;
+        const self: *AllocatorBridge = @ptrCast(@alignCast(context));
+        self.callbacks.deallocate.?(
+            self.callbacks.context,
+            @ptrCast(memory.ptr),
+            memory.len,
+            alignment.toByteUnits(),
+        );
+    }
+
+    fn allocateBytes(self: AllocatorBridge, len: usize, alignment: usize) ?*anyopaque {
+        const pointer = self.callbacks.allocate.?(self.callbacks.context, len, alignment) orelse return null;
+        if (@intFromPtr(pointer) % alignment == 0) return pointer;
+        self.callbacks.deallocate.?(self.callbacks.context, pointer, len, alignment);
+        return null;
+    }
+};
+
+const AllocatorError = error{ InvalidAllocator, OutOfMemory };
+
+fn createHandle(comptime T: type, allocator_value: ?*const CAllocator) AllocatorError!*T {
+    const bridge = AllocatorBridge.init(allocator_value) orelse return error.InvalidAllocator;
+    const handle = bridge.create(T) orelse return error.OutOfMemory;
+    handle.allocator = bridge;
+    return handle;
+}
+
+fn allocatorResult(err: AllocatorError) i32 {
+    return switch (err) {
+        error.InvalidAllocator => invalid_argument,
+        error.OutOfMemory => out_of_memory,
+    };
+}
+
+fn destroyHandle(handle: anytype) void {
+    const allocator = handle.allocator;
+    allocator.destroy(handle);
+}
+
 const RendererHandle = struct {
+    allocator: AllocatorBridge,
     renderer: tui.render.Renderer,
     frame_active: bool = false,
 };
 const TextInputHandle = struct {
+    allocator: AllocatorBridge,
     storage: []u8,
     input: tui.widget.TextInput,
 };
 const TextAreaHandle = struct {
+    allocator: AllocatorBridge,
     storage: []u8,
     model: tui.editor.Model,
     area: tui.widget.TextArea,
@@ -202,6 +295,7 @@ const SampleProvider = struct {
     }
 };
 const LineChartHandle = struct {
+    allocator: AllocatorBridge,
     samples: []f64,
     masks: []u8,
     canvas: tui.render.BrailleCanvas,
@@ -213,11 +307,15 @@ const QueueSlot = struct {
     payload: [event_payload_capacity]u8,
 };
 const EventQueueHandle = struct {
+    allocator: AllocatorBridge,
     slots: []QueueSlot,
     produced: std.atomic.Value(usize) = .init(0),
     consumed: std.atomic.Value(usize) = .init(0),
 };
-const ParserHandle = struct { parser: tui.input.Parser = .{} };
+const ParserHandle = struct {
+    allocator: AllocatorBridge,
+    parser: tui.input.Parser = .{},
+};
 
 fn rendererHandle(value: *tui_renderer_v1) *RendererHandle {
     return @ptrCast(@alignCast(value));
@@ -517,7 +615,7 @@ pub export fn tui_abi_version_v1() callconv(.c) CVersion {
     return .{ .major = 1, .minor = 0, .patch = 0 };
 }
 
-pub export fn tui_renderer_create_v1(size: CSize, config: ?*const CRendererConfig, out: ?*?*tui_renderer_v1) callconv(.c) i32 {
+pub export fn tui_renderer_create_v1(allocator_value: ?*const CAllocator, size: CSize, config: ?*const CRendererConfig, out: ?*?*tui_renderer_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
     const limits: tui.render.Limits = if (config) |value| .{
@@ -528,11 +626,12 @@ pub export fn tui_renderer_create_v1(size: CSize, config: ?*const CRendererConfi
         .tile_width = value.tile_width,
         .tile_height = value.tile_height,
     } else .{};
-    const handle = std.heap.c_allocator.create(RendererHandle) catch return out_of_memory;
-    handle.* = .{ .renderer = tui.render.Renderer.init(std.heap.c_allocator, .{ .width = size.width, .height = size.height }, limits) catch |err| {
-        std.heap.c_allocator.destroy(handle);
+    const handle = createHandle(RendererHandle, allocator_value) catch |err| return allocatorResult(err);
+    handle.renderer = tui.render.Renderer.init(handle.allocator.allocator(), .{ .width = size.width, .height = size.height }, limits) catch |err| {
+        destroyHandle(handle);
         return mapError(err);
-    } };
+    };
+    handle.frame_active = false;
     output.* = @ptrCast(handle);
     return ok;
 }
@@ -541,7 +640,7 @@ pub export fn tui_renderer_destroy_v1(value: ?*tui_renderer_v1) callconv(.c) voi
     const pointer = value orelse return;
     const handle = rendererHandle(pointer);
     handle.renderer.deinit();
-    std.heap.c_allocator.destroy(handle);
+    destroyHandle(handle);
 }
 
 pub export fn tui_renderer_resize_v1(value: ?*tui_renderer_v1, size: CSize) callconv(.c) i32 {
@@ -861,23 +960,22 @@ pub export fn tui_radio_handle_v1(
     return ok;
 }
 
-pub export fn tui_text_input_create_v1(capacity: u64, initial_value: CBytes, out: ?*?*tui_text_input_v1) callconv(.c) i32 {
+pub export fn tui_text_input_create_v1(allocator_value: ?*const CAllocator, capacity: u64, initial_value: CBytes, out: ?*?*tui_text_input_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
     const initial = bytes(initial_value) catch return invalid_argument;
     const storage_len = std.math.cast(usize, capacity) orelse return invalid_argument;
-    const storage = std.heap.c_allocator.alloc(u8, storage_len) catch return out_of_memory;
-    const handle = std.heap.c_allocator.create(TextInputHandle) catch {
-        std.heap.c_allocator.free(storage);
+    const handle = createHandle(TextInputHandle, allocator_value) catch |err| return allocatorResult(err);
+    const allocator = handle.allocator.allocator();
+    const storage = allocator.alloc(u8, storage_len) catch {
+        destroyHandle(handle);
         return out_of_memory;
     };
-    handle.* = .{
-        .storage = storage,
-        .input = tui.widget.TextInput.init(storage, initial) catch |err| {
-            std.heap.c_allocator.free(storage);
-            std.heap.c_allocator.destroy(handle);
-            return mapError(err);
-        },
+    handle.storage = storage;
+    handle.input = tui.widget.TextInput.init(storage, initial) catch |err| {
+        allocator.free(storage);
+        destroyHandle(handle);
+        return mapError(err);
     };
     output.* = @ptrCast(handle);
     return ok;
@@ -886,8 +984,8 @@ pub export fn tui_text_input_create_v1(capacity: u64, initial_value: CBytes, out
 pub export fn tui_text_input_destroy_v1(value: ?*tui_text_input_v1) callconv(.c) void {
     const pointer = value orelse return;
     const handle = textInputHandle(pointer);
-    std.heap.c_allocator.free(handle.storage);
-    std.heap.c_allocator.destroy(handle);
+    handle.allocator.allocator().free(handle.storage);
+    destroyHandle(handle);
 }
 
 pub export fn tui_text_input_draw_v1(value: ?*tui_text_input_v1, renderer_value: ?*tui_renderer_v1, bounds: CRect) callconv(.c) i32 {
@@ -950,20 +1048,21 @@ fn copyValue(value: []const u8, output_pointer: [*c]u8, output_capacity: u64, ne
     return ok;
 }
 
-pub export fn tui_text_area_create_v1(capacity: u64, initial_value: CBytes, out: ?*?*tui_text_area_v1) callconv(.c) i32 {
+pub export fn tui_text_area_create_v1(allocator_value: ?*const CAllocator, capacity: u64, initial_value: CBytes, out: ?*?*tui_text_area_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
     const initial = bytes(initial_value) catch return invalid_argument;
     const storage_len = std.math.cast(usize, capacity) orelse return invalid_argument;
-    const storage = std.heap.c_allocator.alloc(u8, storage_len) catch return out_of_memory;
-    const handle = std.heap.c_allocator.create(TextAreaHandle) catch {
-        std.heap.c_allocator.free(storage);
+    const handle = createHandle(TextAreaHandle, allocator_value) catch |err| return allocatorResult(err);
+    const allocator = handle.allocator.allocator();
+    const storage = allocator.alloc(u8, storage_len) catch {
+        destroyHandle(handle);
         return out_of_memory;
     };
     handle.storage = storage;
     handle.model = tui.editor.Model.init(storage, initial) catch |err| {
-        std.heap.c_allocator.free(storage);
-        std.heap.c_allocator.destroy(handle);
+        allocator.free(storage);
+        destroyHandle(handle);
         return mapError(err);
     };
     handle.area = .{ .model = &handle.model };
@@ -974,8 +1073,8 @@ pub export fn tui_text_area_create_v1(capacity: u64, initial_value: CBytes, out:
 pub export fn tui_text_area_destroy_v1(value: ?*tui_text_area_v1) callconv(.c) void {
     const pointer = value orelse return;
     const handle = textAreaHandle(pointer);
-    std.heap.c_allocator.free(handle.storage);
-    std.heap.c_allocator.destroy(handle);
+    handle.allocator.allocator().free(handle.storage);
+    destroyHandle(handle);
 }
 
 pub export fn tui_text_area_layout_v1(value: ?*tui_text_area_v1, size: CSize) callconv(.c) i32 {
@@ -1024,17 +1123,19 @@ pub export fn tui_text_area_take_failure_v1(value: ?*tui_text_area_v1, failure: 
     return ok;
 }
 
-pub export fn tui_event_queue_create_v1(capacity: u64, out: ?*?*tui_event_queue_v1) callconv(.c) i32 {
+pub export fn tui_event_queue_create_v1(allocator_value: ?*const CAllocator, capacity: u64, out: ?*?*tui_event_queue_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
     const count = std.math.cast(usize, capacity) orelse return invalid_argument;
     if (count == 0 or count > std.math.maxInt(usize) / 2) return invalid_argument;
-    const slots = std.heap.c_allocator.alloc(QueueSlot, count) catch return out_of_memory;
-    const handle = std.heap.c_allocator.create(EventQueueHandle) catch {
-        std.heap.c_allocator.free(slots);
+    const handle = createHandle(EventQueueHandle, allocator_value) catch |err| return allocatorResult(err);
+    const slots = handle.allocator.allocator().alloc(QueueSlot, count) catch {
+        destroyHandle(handle);
         return out_of_memory;
     };
-    handle.* = .{ .slots = slots };
+    handle.slots = slots;
+    handle.produced = .init(0);
+    handle.consumed = .init(0);
     output.* = @ptrCast(handle);
     return ok;
 }
@@ -1042,8 +1143,8 @@ pub export fn tui_event_queue_create_v1(capacity: u64, out: ?*?*tui_event_queue_
 pub export fn tui_event_queue_destroy_v1(value: ?*tui_event_queue_v1) callconv(.c) void {
     const pointer = value orelse return;
     const handle = eventQueueHandle(pointer);
-    std.heap.c_allocator.free(handle.slots);
-    std.heap.c_allocator.destroy(handle);
+    handle.allocator.allocator().free(handle.slots);
+    destroyHandle(handle);
 }
 
 pub export fn tui_event_queue_try_push_v1(value: ?*tui_event_queue_v1, event_value: ?*const CEvent) callconv(.c) i32 {
@@ -1108,17 +1209,17 @@ const QueueSink = struct {
     }
 };
 
-pub export fn tui_parser_create_v1(out: ?*?*tui_parser_v1) callconv(.c) i32 {
+pub export fn tui_parser_create_v1(allocator_value: ?*const CAllocator, out: ?*?*tui_parser_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
-    const handle = std.heap.c_allocator.create(ParserHandle) catch return out_of_memory;
-    handle.* = .{};
+    const handle = createHandle(ParserHandle, allocator_value) catch |err| return allocatorResult(err);
+    handle.parser = .{};
     output.* = @ptrCast(handle);
     return ok;
 }
 
 pub export fn tui_parser_destroy_v1(value: ?*tui_parser_v1) callconv(.c) void {
-    std.heap.c_allocator.destroy(parserHandle(value orelse return));
+    destroyHandle(parserHandle(value orelse return));
 }
 
 pub export fn tui_parser_feed_v1(value: ?*tui_parser_v1, input: CBytes, queue_value: ?*tui_event_queue_v1) callconv(.c) i32 {
@@ -1501,26 +1602,25 @@ pub export fn tui_table_draw_v1(
     return ok;
 }
 
-pub export fn tui_line_chart_create_v1(sample_capacity: u64, cell_capacity: u64, out: ?*?*tui_line_chart_v1) callconv(.c) i32 {
+pub export fn tui_line_chart_create_v1(allocator_value: ?*const CAllocator, sample_capacity: u64, cell_capacity: u64, out: ?*?*tui_line_chart_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
     const sample_count = std.math.cast(usize, sample_capacity) orelse return invalid_argument;
     const cell_count = std.math.cast(usize, cell_capacity) orelse return invalid_argument;
-    const samples = std.heap.c_allocator.alloc(f64, sample_count) catch return out_of_memory;
-    const masks = std.heap.c_allocator.alloc(u8, cell_count) catch {
-        std.heap.c_allocator.free(samples);
+    const handle = createHandle(LineChartHandle, allocator_value) catch |err| return allocatorResult(err);
+    const allocator = handle.allocator.allocator();
+    const samples = allocator.alloc(f64, sample_count) catch {
+        destroyHandle(handle);
         return out_of_memory;
     };
-    const handle = std.heap.c_allocator.create(LineChartHandle) catch {
-        std.heap.c_allocator.free(masks);
-        std.heap.c_allocator.free(samples);
+    const masks = allocator.alloc(u8, cell_count) catch {
+        allocator.free(samples);
+        destroyHandle(handle);
         return out_of_memory;
     };
-    handle.* = .{
-        .samples = samples,
-        .masks = masks,
-        .canvas = tui.render.BrailleCanvas.init(masks, .{ .width = 0, .height = 0 }) catch unreachable,
-    };
+    handle.samples = samples;
+    handle.masks = masks;
+    handle.canvas = tui.render.BrailleCanvas.init(masks, .{ .width = 0, .height = 0 }) catch unreachable;
     output.* = @ptrCast(handle);
     return ok;
 }
@@ -1528,9 +1628,10 @@ pub export fn tui_line_chart_create_v1(sample_capacity: u64, cell_capacity: u64,
 pub export fn tui_line_chart_destroy_v1(value: ?*tui_line_chart_v1) callconv(.c) void {
     const pointer = value orelse return;
     const handle = lineChartHandle(pointer);
-    std.heap.c_allocator.free(handle.masks);
-    std.heap.c_allocator.free(handle.samples);
-    std.heap.c_allocator.destroy(handle);
+    const allocator = handle.allocator.allocator();
+    allocator.free(handle.masks);
+    allocator.free(handle.samples);
+    destroyHandle(handle);
 }
 
 pub export fn tui_line_chart_draw_v1(

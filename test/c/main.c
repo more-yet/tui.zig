@@ -1,7 +1,62 @@
 #include "tui.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
+
+typedef struct {
+    uint64_t attempts;
+    uint64_t allocations;
+    uint64_t deallocations;
+    uint64_t live_bytes;
+    uint64_t fail_at;
+    int reject;
+} allocator_state;
+
+static void *allocate(void *context, uint64_t size, uint64_t alignment) {
+    allocator_state *state = (allocator_state *)context;
+    void *memory;
+    state->attempts += 1;
+    if (state->reject || (state->fail_at != 0 && state->allocations == state->fail_at) ||
+        size > SIZE_MAX || alignment == 0 || alignment > _Alignof(max_align_t)) return NULL;
+    memory = malloc((size_t)size);
+    if (memory == NULL) return NULL;
+    if ((uintptr_t)memory % alignment != 0) {
+        free(memory);
+        return NULL;
+    }
+    state->allocations += 1;
+    state->live_bytes += size;
+    return memory;
+}
+
+static void deallocate(void *context, void *memory, uint64_t size, uint64_t alignment) {
+    allocator_state *state = (allocator_state *)context;
+    (void)alignment;
+    state->deallocations += 1;
+    state->live_bytes -= size;
+    free(memory);
+}
+
+static _Alignas(max_align_t) uint8_t misaligned_storage[4096];
+
+static void *allocate_misaligned(void *context, uint64_t size, uint64_t alignment) {
+    uintptr_t base = (uintptr_t)misaligned_storage;
+    uintptr_t aligned;
+    (void)context;
+    if (alignment == 0 || alignment >= sizeof(misaligned_storage) ||
+        size > sizeof(misaligned_storage) - alignment - 1) return NULL;
+    aligned = (base + alignment - 1) & ~(uintptr_t)(alignment - 1);
+    return (void *)(aligned + 1);
+}
+
+static void deallocate_misaligned(void *context, void *memory, uint64_t size, uint64_t alignment) {
+    uint64_t *calls = (uint64_t *)context;
+    (void)memory;
+    (void)size;
+    (void)alignment;
+    *calls += 1;
+}
 
 static tui_utf8_v1 text(const char *value) {
     tui_utf8_v1 result;
@@ -46,12 +101,18 @@ static tui_result_v1 read_samples(void *context, uint64_t first, uint32_t count,
 }
 
 int main(void) {
+    allocator_state allocation = {0};
+    tui_allocator_v1 allocator = {&allocation, allocate, deallocate};
+    tui_allocator_v1 incomplete_allocator = {NULL, NULL, NULL};
+    uint64_t misaligned_deallocations = 0;
+    tui_allocator_v1 misaligned_allocator = {&misaligned_deallocations, allocate_misaligned, deallocate_misaligned};
     tui_renderer_v1 *renderer = NULL;
     tui_text_input_v1 *input = NULL;
     tui_text_area_v1 *area = NULL;
     tui_line_chart_v1 *chart = NULL;
     tui_event_queue_v1 *queue = NULL;
     tui_parser_v1 *parser = NULL;
+    tui_renderer_v1 *rejected_renderer = (tui_renderer_v1 *)(uintptr_t)1;
     tui_text_desc_v1 text_desc;
     tui_panel_desc_v1 panel_desc;
     tui_gauge_desc_v1 gauge_desc;
@@ -75,6 +136,8 @@ int main(void) {
     uint8_t payload[256];
     uint8_t image_pixels[3] = {255, 0, 0};
     uint64_t output_bytes = 0;
+    uint64_t steady_attempts;
+    tui_parser_v1 *rejected = (tui_parser_v1 *)(uintptr_t)1;
 
     memset(&text_desc, 0, sizeof(text_desc));
     memset(&panel_desc, 0, sizeof(panel_desc));
@@ -91,7 +154,28 @@ int main(void) {
     memset(&capabilities, 0, sizeof(capabilities));
 
     if (tui_abi_version_v1().major != TUI_ABI_MAJOR_V1) return 1;
-    if (tui_renderer_create_v1((tui_size_v1){40, 16}, NULL, &renderer) != TUI_OK_V1) return 2;
+    if (tui_parser_create_v1(NULL, &rejected) != TUI_ERROR_INVALID_ARGUMENT_V1 || rejected != NULL) return 2;
+    rejected = (tui_parser_v1 *)(uintptr_t)1;
+    if (tui_parser_create_v1(&incomplete_allocator, &rejected) != TUI_ERROR_INVALID_ARGUMENT_V1 || rejected != NULL) return 2;
+    rejected = (tui_parser_v1 *)(uintptr_t)1;
+    if (tui_parser_create_v1(&misaligned_allocator, &rejected) != TUI_ERROR_OUT_OF_MEMORY_V1 ||
+        rejected != NULL || misaligned_deallocations != 1) return 2;
+    rejected = (tui_parser_v1 *)(uintptr_t)1;
+    allocation.reject = 1;
+    if (tui_parser_create_v1(&allocator, &rejected) != TUI_ERROR_OUT_OF_MEMORY_V1 || rejected != NULL) return 2;
+    allocation.reject = 0;
+    allocation.fail_at = allocation.allocations + 2;
+    if (tui_renderer_create_v1(&allocator, (tui_size_v1){4, 2}, NULL, &rejected_renderer) != TUI_ERROR_OUT_OF_MEMORY_V1 ||
+        rejected_renderer != NULL || allocation.live_bytes != 0) return 2;
+    allocation.fail_at = 0;
+    if (tui_renderer_create_v1(&allocator, (tui_size_v1){40, 16}, NULL, &renderer) != TUI_OK_V1) return 2;
+    if (tui_renderer_resize_v1(renderer, (tui_size_v1){41, 16}) != TUI_OK_V1) return 2;
+    if (tui_text_input_create_v1(&allocator, 32, text("ready"), &input) != 0) return 2;
+    if (tui_text_area_create_v1(&allocator, 64, text("one\ntwo"), &area) != 0) return 2;
+    if (tui_line_chart_create_v1(&allocator, 8, 8, &chart) != 0) return 2;
+    if (tui_event_queue_create_v1(&allocator, 4, &queue) != 0 || tui_parser_create_v1(&allocator, &parser) != 0) return 2;
+    steady_attempts = allocation.attempts;
+    allocation.reject = 1;
     if (tui_renderer_begin_frame_v1(renderer) != TUI_OK_V1) return 3;
 
     text_desc.text = text("label");
@@ -120,14 +204,12 @@ int main(void) {
     if (tui_radio_handle_v1(&control_desc, &radio_state, 7, &event, &update) != 0) return 13;
     if (tui_radio_draw_v1(renderer, (tui_rect_v1){0, 6, 12, 1}, &control_desc, &radio_state, 7) != 0) return 14;
 
-    if (tui_text_input_create_v1(32, text("ready"), &input) != 0) return 15;
     if (tui_text_input_set_focus_v1(input, 1) != 0) return 16;
     event.kind = TUI_EVENT_TEXT_V1;
     event.payload = text("!");
     if (tui_text_input_handle_v1(input, &event, &update) != 0) return 17;
     if (tui_text_input_draw_v1(input, renderer, (tui_rect_v1){0, 7, 15, 1}) != 0) return 18;
 
-    if (tui_text_area_create_v1(64, text("one\ntwo"), &area) != 0) return 19;
     if (tui_text_area_layout_v1(area, (tui_size_v1){15, 2}) != 0) return 20;
     if (tui_text_area_set_focus_v1(area, 1) != 0 || tui_text_area_set_soft_wrap_v1(area, 1) != 0) return 21;
     if (tui_text_area_draw_v1(area, renderer, (tui_rect_v1){0, 8, 15, 2}) != 0) return 22;
@@ -152,7 +234,6 @@ int main(void) {
     if (tui_task_list_handle_v1((tui_rect_v1){27, 8, 12, 2}, &menu_state, &rows_provider, &event, &update) != 0) return 33;
     if (tui_menu_handle_v1((tui_rect_v1){16, 10, 10, 2}, &menu_state, &rows_provider, &event, &update) != 0) return 34;
 
-    if (tui_line_chart_create_v1(8, 8, &chart) != 0) return 35;
     samples_provider.context = NULL; samples_provider.count = 4; samples_provider.read = read_samples;
     if (tui_line_chart_draw_v1(chart, renderer, (tui_rect_v1){27, 11, 2, 2}, &samples_provider, collection_desc.row_role) != 0) return 36;
 
@@ -162,11 +243,11 @@ int main(void) {
     output.context = &output_bytes; output.write = write_output;
     if (tui_renderer_present_v1(renderer, capabilities, output, &stats) != 0 || output_bytes == 0) return 38;
 
-    if (tui_event_queue_create_v1(4, &queue) != 0 || tui_parser_create_v1(&parser) != 0) return 39;
     if (tui_parser_feed_v1(parser, text("a"), queue) != 0) return 40;
     if (tui_event_queue_try_pop_v1(queue, payload, sizeof(payload), &popped) != 0) return 41;
     if (popped.kind != TUI_EVENT_TEXT_V1 || popped.payload.len != 1 || payload[0] != 'a') return 42;
     if (tui_parser_finish_v1(parser, queue) != 0 || tui_parser_abort_v1(parser, queue) != 0) return 43;
+    if (allocation.attempts != steady_attempts) return 44;
 
     tui_parser_destroy_v1(parser);
     tui_event_queue_destroy_v1(queue);
@@ -174,5 +255,6 @@ int main(void) {
     tui_text_area_destroy_v1(area);
     tui_text_input_destroy_v1(input);
     tui_renderer_destroy_v1(renderer);
+    if (allocation.allocations == 0 || allocation.allocations != allocation.deallocations || allocation.live_bytes != 0) return 45;
     return 0;
 }

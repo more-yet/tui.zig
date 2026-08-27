@@ -44,6 +44,18 @@ typedef struct { uint16_t width, height; } tui_size_v1;
 typedef struct { uint16_t x, y; } tui_point_v1;
 typedef struct { uint16_t x, y, width, height; } tui_rect_v1;
 
+/* Both callbacks are required. Allocation returns NULL on failure and otherwise
+   honors the power-of-two alignment. Deallocation receives the same size and
+   alignment. Create functions copy the table; context must remain valid until
+   destroy. Callbacks must not unwind across the C ABI. */
+typedef void *(*tui_allocate_fn_v1)(void *context, uint64_t size, uint64_t alignment);
+typedef void (*tui_deallocate_fn_v1)(void *context, void *memory, uint64_t size, uint64_t alignment);
+typedef struct {
+    void *context;
+    tui_allocate_fn_v1 allocate;
+    tui_deallocate_fn_v1 deallocate;
+} tui_allocator_v1;
+
 enum { TUI_COLOR_DEFAULT_V1 = 0, TUI_COLOR_INDEXED_V1 = 1, TUI_COLOR_RGB_V1 = 2 };
 typedef struct {
     int32_t kind;
@@ -157,7 +169,7 @@ typedef struct {
 } tui_image_options_v1;
 
 tui_version_v1 tui_abi_version_v1(void);
-tui_result_v1 tui_renderer_create_v1(tui_size_v1 size, const tui_renderer_config_v1 *config, tui_renderer_v1 **out);
+tui_result_v1 tui_renderer_create_v1(const tui_allocator_v1 *allocator, tui_size_v1 size, const tui_renderer_config_v1 *config, tui_renderer_v1 **out);
 void tui_renderer_destroy_v1(tui_renderer_v1 *renderer);
 tui_result_v1 tui_renderer_resize_v1(tui_renderer_v1 *renderer, tui_size_v1 size);
 tui_result_v1 tui_renderer_begin_frame_v1(tui_renderer_v1 *renderer);
@@ -187,7 +199,7 @@ tui_result_v1 tui_checkbox_handle_v1(const tui_control_desc_v1 *, tui_checkbox_s
 tui_result_v1 tui_radio_draw_v1(tui_renderer_v1 *, tui_rect_v1, const tui_control_desc_v1 *, tui_radio_state_v1 *, uint32_t value);
 tui_result_v1 tui_radio_handle_v1(const tui_control_desc_v1 *, tui_radio_state_v1 *, uint32_t value, const tui_event_v1 *, tui_update_v1 *);
 
-tui_result_v1 tui_text_input_create_v1(uint64_t capacity, tui_utf8_v1 initial, tui_text_input_v1 **out);
+tui_result_v1 tui_text_input_create_v1(const tui_allocator_v1 *allocator, uint64_t capacity, tui_utf8_v1 initial, tui_text_input_v1 **out);
 void tui_text_input_destroy_v1(tui_text_input_v1 *);
 tui_result_v1 tui_text_input_draw_v1(tui_text_input_v1 *, tui_renderer_v1 *, tui_rect_v1);
 tui_result_v1 tui_text_input_handle_v1(tui_text_input_v1 *, const tui_event_v1 *, tui_update_v1 *);
@@ -197,7 +209,7 @@ tui_result_v1 tui_text_input_replace_selection_v1(tui_text_input_v1 *, tui_utf8_
 tui_result_v1 tui_text_input_copy_value_v1(const tui_text_input_v1 *, uint8_t *out, uint64_t capacity, uint64_t *needed);
 tui_result_v1 tui_text_input_take_failure_v1(tui_text_input_v1 *, int32_t *failure);
 
-tui_result_v1 tui_text_area_create_v1(uint64_t capacity, tui_utf8_v1 initial, tui_text_area_v1 **out);
+tui_result_v1 tui_text_area_create_v1(const tui_allocator_v1 *allocator, uint64_t capacity, tui_utf8_v1 initial, tui_text_area_v1 **out);
 void tui_text_area_destroy_v1(tui_text_area_v1 *);
 tui_result_v1 tui_text_area_layout_v1(tui_text_area_v1 *, tui_size_v1);
 tui_result_v1 tui_text_area_draw_v1(tui_text_area_v1 *, tui_renderer_v1 *, tui_rect_v1);
@@ -242,16 +254,16 @@ tui_result_v1 tui_menu_handle_v1(tui_rect_v1, tui_menu_state_v1 *, const tui_row
 
 typedef tui_result_v1 (*tui_samples_read_fn_v1)(void *context, uint64_t first, uint32_t count, double *samples);
 typedef struct { void *context; uint64_t count; tui_samples_read_fn_v1 read; } tui_samples_provider_v1;
-tui_result_v1 tui_line_chart_create_v1(uint64_t sample_capacity, uint64_t cell_capacity, tui_line_chart_v1 **out);
+tui_result_v1 tui_line_chart_create_v1(const tui_allocator_v1 *allocator, uint64_t sample_capacity, uint64_t cell_capacity, tui_line_chart_v1 **out);
 void tui_line_chart_destroy_v1(tui_line_chart_v1 *);
 tui_result_v1 tui_line_chart_draw_v1(tui_line_chart_v1 *, tui_renderer_v1 *, tui_rect_v1, const tui_samples_provider_v1 *, tui_role_v1);
 
 /* The bounded event queue supports one producer and one consumer concurrently. */
-tui_result_v1 tui_event_queue_create_v1(uint64_t capacity, tui_event_queue_v1 **out);
+tui_result_v1 tui_event_queue_create_v1(const tui_allocator_v1 *allocator, uint64_t capacity, tui_event_queue_v1 **out);
 void tui_event_queue_destroy_v1(tui_event_queue_v1 *);
 tui_result_v1 tui_event_queue_try_push_v1(tui_event_queue_v1 *, const tui_event_v1 *);
 tui_result_v1 tui_event_queue_try_pop_v1(tui_event_queue_v1 *, uint8_t *payload, uint64_t capacity, tui_event_v1 *out);
-tui_result_v1 tui_parser_create_v1(tui_parser_v1 **out);
+tui_result_v1 tui_parser_create_v1(const tui_allocator_v1 *allocator, tui_parser_v1 **out);
 void tui_parser_destroy_v1(tui_parser_v1 *);
 tui_result_v1 tui_parser_feed_v1(tui_parser_v1 *, tui_bytes_v1, tui_event_queue_v1 *);
 tui_result_v1 tui_parser_finish_v1(tui_parser_v1 *, tui_event_queue_v1 *);
