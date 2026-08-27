@@ -94,16 +94,7 @@ pub const BrailleCanvas = struct {
 
     pub fn draw(self: *const BrailleCanvas, surface: *renderer.Surface, style: style_module.Style) !void {
         std.debug.assert(surface.size().width == self.width and surface.size().height == self.height);
-        var y: u16 = 0;
-        while (y < self.height) : (y += 1) {
-            var x: u16 = 0;
-            while (x < self.width) : (x += 1) {
-                const codepoint = @as(u21, 0x2800) + self.cells()[@as(usize, y) * self.width + x];
-                var encoded: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &encoded) catch unreachable;
-                _ = try surface.putText(.{ .x = x, .y = y }, encoded[0..len], style, .narrow);
-            }
-        }
+        try surface.putBrailleMasks(self.cells(), style);
     }
 
     fn cells(self: *const BrailleCanvas) []u8 {
@@ -137,4 +128,13 @@ test "braille canvas maps dots and lines without allocation" {
     var glyph: [text.max_grapheme_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("\xE2\xA2\x81", output.desiredCellView(.{ .x = 0, .y = 0 }, &glyph).?.glyph);
     try std.testing.expect(!failing.has_induced_failure);
+
+    var clipped_output = try renderer.Renderer.init(std.testing.allocator, .{ .width = 2, .height = 1 }, .{});
+    defer clipped_output.deinit();
+    frame = clipped_output.frame();
+    var parent = frame.surface(.{ .x = 1, .y = 0, .width = 1, .height = 1 });
+    surface = parent.surface(.{ .x = 0, .y = 0, .width = 2, .height = 1 });
+    try canvas.draw(&surface, .{});
+    try std.testing.expectEqualStrings(" ", clipped_output.desiredCellView(.{ .x = 0, .y = 0 }, &glyph).?.glyph);
+    try std.testing.expectEqualStrings("\xE2\xA2\x81", clipped_output.desiredCellView(.{ .x = 1, .y = 0 }, &glyph).?.glyph);
 }

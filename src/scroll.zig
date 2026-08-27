@@ -155,6 +155,12 @@ pub fn LineRing(comptime max_line_bytes_value: usize) type {
             if (line.len > max_line_bytes) return error.LineTooLong;
             _ = text_line.measure(line, .narrow) catch return error.InvalidLine;
 
+            return self.appendValid(line);
+        }
+
+        inline fn appendValid(self: *Self, line: []const u8) AppendError!AppendResult {
+            if (self.storage.len == 0) return error.NoCapacity;
+            if (line.len > max_line_bytes) return error.LineTooLong;
             const full = self.line_count == self.storage.len;
             const index = if (full) self.head else self.indexOf(self.line_count);
             copyLine(self.storage[index].bytes[0..line.len], line);
@@ -200,6 +206,12 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
         discarding: ?Rejection = null,
 
         pub fn feed(self: *Self, ring: *Ring, input: []const u8) DecodeResult {
+            if (self.len == 0 and !self.pending_cr and self.discarding == null and
+                std.mem.indexOfScalar(u8, input, '\r') == null)
+            {
+                return self.feedLf(ring, input);
+            }
+
             var result: DecodeResult = .{};
             for (input) |byte| {
                 if (self.discarding) |reason| {
@@ -234,6 +246,47 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
                 }
             }
             return result;
+        }
+
+        fn feedLf(self: *Self, ring: *Ring, input: []const u8) DecodeResult {
+            var result: DecodeResult = .{};
+            var start: usize = 0;
+            for (input, 0..) |byte, end| {
+                if (byte != '\n') continue;
+                const line = input[start..end];
+                if (line.len > max_line_bytes) {
+                    result.overlong_rows += 1;
+                } else {
+                    self.appendComplete(ring, &result, line);
+                }
+                start = end + 1;
+            }
+
+            const tail = input[start..];
+            if (tail.len > self.bytes.len) {
+                self.discarding = .overlong;
+            } else {
+                @memcpy(self.bytes[0..tail.len], tail);
+                self.len = tail.len;
+            }
+            return result;
+        }
+
+        inline fn appendComplete(self: *Self, ring: *Ring, result: *DecodeResult, line: []const u8) void {
+            _ = self;
+            std.debug.assert(line.len <= max_line_bytes);
+            const appended = if (printableAscii(line))
+                ring.appendValid(line)
+            else
+                ring.append(line);
+            if (appended) |value| {
+                result.appended_rows += 1;
+                result.dropped_rows += value.dropped_rows;
+            } else |err| switch (err) {
+                error.NoCapacity => result.unavailable_rows += 1,
+                error.LineTooLong => unreachable,
+                error.InvalidLine => result.invalid_rows += 1,
+            }
         }
 
         /// Flushes one final unterminated line and reports any incomplete rejected row.
@@ -279,6 +332,11 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
             }
         }
     };
+}
+
+inline fn printableAscii(value: []const u8) bool {
+    for (value) |byte| if (byte < 0x20 or byte > 0x7e) return false;
+    return true;
 }
 
 fn nextIndex(index: usize, capacity: usize) usize {
@@ -439,4 +497,23 @@ test "line decoder rejects and resynchronizes unsafe rows" {
     var unavailable: Unavailable = .{};
     const unavailable_result = unavailable.feed(&unavailable_ring, "\n");
     try std.testing.expectEqual(@as(usize, 1), unavailable_result.unavailable_rows);
+}
+
+test "line decoder batches LF rows without bypassing validation" {
+    const Decoder = LineDecoder(4);
+    var slots: [2]Decoder.Ring.Slot = undefined;
+    var ring = Decoder.Ring.init(&slots);
+    var decoder: Decoder = .{};
+
+    const result = decoder.feed(&ring, "a\nb\nc\x1b\n12345\nt");
+    try std.testing.expectEqual(@as(usize, 2), result.appended_rows);
+    try std.testing.expectEqual(@as(usize, 1), result.invalid_rows);
+    try std.testing.expectEqual(@as(usize, 1), result.overlong_rows);
+    try std.testing.expectEqual(@as(usize, 0), result.dropped_rows);
+
+    const finished = decoder.finish(&ring);
+    try std.testing.expectEqual(@as(usize, 1), finished.appended_rows);
+    try std.testing.expectEqual(@as(usize, 1), finished.dropped_rows);
+    try std.testing.expectEqualStrings("b", ring.row(0));
+    try std.testing.expectEqualStrings("t", ring.row(1));
 }

@@ -196,7 +196,7 @@ fn writeEnter(
     if (options.alternate_screen) try writer.writeAll("\x1b[?1049h");
     if (options.bracketed_paste) try writer.writeAll("\x1b[?2004h");
     if (options.focus_events) try writer.writeAll("\x1b[?1004h");
-    if (options.mouse) try writer.writeAll("\x1b[?1000h\x1b[?1006h");
+    if (options.mouse) try writer.writeAll("\x1b[?1002h\x1b[?1006h");
     if (kitty_keyboard) {
         try writer.writeAll("\x1b[>1u");
         kitty_keyboard_active.* = true;
@@ -211,7 +211,7 @@ fn writeLeave(writer: *std.Io.Writer, options: Options, kitty_keyboard_active: *
         try writer.writeAll("\x1b[<u");
         kitty_keyboard_active.* = false;
     }
-    if (options.mouse) try writer.writeAll("\x1b[?1006l\x1b[?1000l");
+    if (options.mouse) try writer.writeAll("\x1b[?1006l\x1b[?1002l");
     if (options.focus_events) try writer.writeAll("\x1b[?1004l");
     if (options.bracketed_paste) try writer.writeAll("\x1b[?2004l");
     if (options.alternate_screen) try writer.writeAll("\x1b[?1049l");
@@ -222,7 +222,7 @@ fn leaveSequence(options: Options, kitty_keyboard: bool, buffer: *[128]u8) []con
     append(buffer, &length, "\x1b[?2026l\x1b[0m\x1b[0 q");
     if (options.hide_cursor) append(buffer, &length, "\x1b[?25h");
     if (kitty_keyboard) append(buffer, &length, "\x1b[<u");
-    if (options.mouse) append(buffer, &length, "\x1b[?1006l\x1b[?1000l");
+    if (options.mouse) append(buffer, &length, "\x1b[?1006l\x1b[?1002l");
     if (options.focus_events) append(buffer, &length, "\x1b[?1004l");
     if (options.bracketed_paste) append(buffer, &length, "\x1b[?2004l");
     if (options.alternate_screen) append(buffer, &length, "\x1b[?1049l");

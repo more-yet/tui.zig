@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2) {
         var buffer: [256]u8 = undefined;
         var stderr = std.Io.File.stderr().writer(init.io, &buffer);
-        try stderr.interface.writeAll("usage: process-console /absolute/path [args...]\n");
+        try stderr.interface.writeAll("usage: tui-process-console-fixture /absolute/path [args...]\n");
         try stderr.interface.flush();
         return;
     }

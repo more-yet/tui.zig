@@ -412,6 +412,17 @@ const Adler = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const end = @min(bytes.len, offset + 5_552);
+            while (end - offset >= 16) : (offset += 16) {
+                var sum: u32 = 0;
+                var weighted: u32 = 0;
+                inline for (0..16) |index| {
+                    const byte = bytes[offset + index];
+                    sum += byte;
+                    weighted += @as(u32, byte) * @as(u32, @intCast(16 - index));
+                }
+                second += 16 * first + weighted;
+                first += sum;
+            }
             for (bytes[offset..end]) |byte| {
                 first += byte;
                 second += first;
@@ -523,6 +534,17 @@ test "iTerm2 output streams a valid PNG signature through multipart base64" {
 
 test "PNG CRC uses the standard reflected polynomial" {
     try std.testing.expectEqual(@as(u32, 0xcbf4_3926), ~crcUpdate(0xffff_ffff, "123456789"));
+}
+
+test "Adler checksum supports block and fragmented updates" {
+    var whole: Adler = .{};
+    whole.update("Wikipedia");
+    try std.testing.expectEqual(@as(u32, 0x11e6_0398), whole.value());
+
+    var fragmented: Adler = .{};
+    fragmented.update("Wiki");
+    fragmented.update("pedia");
+    try std.testing.expectEqual(whole.value(), fragmented.value());
 }
 
 test "Sixel output validates pixels and composites RGBA" {

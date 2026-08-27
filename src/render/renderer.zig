@@ -3099,6 +3099,29 @@ pub const Surface = struct {
         return frame.putTextUntil(placement.point, text, style, width_profile, placement.end_x);
     }
 
+    pub fn putBrailleMasks(self: *Surface, masks: []const u8, style: style_module.Style) !void {
+        const required = @as(usize, self.extent.width) * self.extent.height;
+        if (masks.len < required) return error.BufferTooSmall;
+        if (self.clip.isEmpty()) return;
+
+        const start_x: u16 = @intCast(self.clip.x - self.origin.x);
+        const start_y: u16 = @intCast(self.clip.y - self.origin.y);
+        const end_x: u16 = @intCast(@min(self.clip.right(), @as(u32, self.origin.x) + self.extent.width) - self.origin.x);
+        const end_y: u16 = @intCast(@min(self.clip.bottom(), @as(u32, self.origin.y) + self.extent.height) - self.origin.y);
+        const style_id = try self.renderer.styles.intern(style);
+        defer self.renderer.styles.release(style_id);
+
+        var y = start_y;
+        while (y < end_y) : (y += 1) {
+            var x = start_x;
+            while (x < end_x) : (x += 1) {
+                const mask = masks[@as(usize, y) * self.extent.width + x];
+                const glyph = @as(glyph_store.Glyph, 0x2800) + mask;
+                self.renderer.setGlyph(self.origin.x + x, self.origin.y + y, glyph, style_id, .narrow);
+            }
+        }
+    }
+
     pub fn putTextPadded(
         self: *Surface,
         origin: geometry.Point,

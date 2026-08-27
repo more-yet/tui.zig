@@ -125,7 +125,7 @@ test "POSIX session writes enabled modes in safe order" {
         .kitty_keyboard = true,
     });
     try std.testing.expectEqualStrings(
-        "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[>1u\x1b[?25l",
+        "\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[>1u\x1b[?25l",
         enter.buffered(),
     );
 
@@ -140,7 +140,7 @@ test "POSIX session writes enabled modes in safe order" {
     var leave = std.Io.Writer.fixed(&leave_buffer);
     try session.leave(&leave);
     try std.testing.expectEqualStrings(
-        "\x1b[?2026l\x1b[0m\x1b[0 q\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1000l\x1b[?1004l\x1b[?2004l\x1b[?1049l",
+        "\x1b[?2026l\x1b[0m\x1b[0 q\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[?1049l",
         leave.buffered(),
     );
 

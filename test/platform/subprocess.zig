@@ -338,11 +338,11 @@ test "process console remains responsive under sustained child output" {
     try readToEof(&process, &drain);
 }
 
-test "coding assistant reference streams a prompt and restores its terminal" {
+test "native portfolio renders and restores its terminal" {
     var pointers: [2]?[*:0]const u8 = undefined;
     var bytes: [256]u8 = undefined;
     var storage = tui.subprocess.SpawnStorage.init(&pointers, &bytes);
-    const arguments = [_][]const u8{fixture.assistant_path};
+    const arguments = [_][]const u8{fixture.demo_path};
     var process = try tui.subprocess.PtyProcess.spawnBeforeThreads(
         std.testing.io,
         .{ .argv = &arguments, .environ = std.testing.environ },
@@ -353,9 +353,7 @@ test "coding assistant reference streams a prompt and restores its terminal" {
 
     var output: [32 * 1024]u8 = undefined;
     var output_len: usize = 0;
-    try readUntil(&process, &output, &output_len, "tui.zig assistant reference");
-    try writeAll(&process, "hello\x13");
-    try readUntil(&process, &output, &output_len, "streamed output uses bounded chunks");
+    try readUntil(&process, &output, &output_len, "OVERVIEW");
     try writeAll(&process, "\x11");
     const event = try process.wait();
     try std.testing.expect(event == .exit);

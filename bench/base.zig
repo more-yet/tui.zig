@@ -1,6 +1,6 @@
 const std = @import("std");
 const tui = @import("tui");
-const assistant_demo = @import("assistant_demo");
+const demo_app = @import("demo_app");
 
 const batch_count = 9;
 const default_iterations = 250_000;
@@ -87,7 +87,7 @@ const Scenario = enum {
     text_area,
     text_area_full,
     text_area_soft_wrap,
-    assistant_cycle,
+    demo_cycle,
     scrollback_view,
     list_view,
     table_view,
@@ -1115,12 +1115,11 @@ fn runScenario(
         _ = try text_area_model.setCursor(0);
         if (text_area.handle(.{ .key = .{ .code = .end, .modifiers = .{ .shift = true } } }) != .redraw) unreachable;
     }
-    var assistant_slots: [64]assistant_demo.Ring.Slot = undefined;
-    var assistant_ring = assistant_demo.Ring.init(&assistant_slots);
-    var assistant_prompt_storage: [128]u8 = undefined;
-    var assistant_prompt = try tui.editor.Model.init(&assistant_prompt_storage, "");
-    var assistant = try assistant_demo.AssistantApp.init(&assistant_ring, &assistant_prompt);
-    if (scenario == .assistant_cycle) assistant.layout(.{ .width = 80, .height = 24 });
+    var portfolio_input_storage: [256]u8 = undefined;
+    var portfolio_editor_storage: [1024]u8 = undefined;
+    var portfolio_editor = try tui.editor.Model.init(&portfolio_editor_storage, "Bounded portfolio editor");
+    var portfolio = try demo_app.DemoApp.init(&portfolio_input_storage, &portfolio_editor);
+    if (scenario == .demo_cycle) portfolio.layout(.{ .width = 80, .height = 24 });
     var data_state: BenchmarkDataState = .{};
 
     const warmup_iterations = @min(iterations, 1_000);
@@ -1135,7 +1134,7 @@ fn runScenario(
             &form_state,
             &text_input,
             &text_area,
-            &assistant,
+            &portfolio,
             &data_state,
             iteration,
         );
@@ -1164,7 +1163,7 @@ fn runScenario(
                 &form_state,
                 &text_input,
                 &text_area,
-                &assistant,
+                &portfolio,
                 &data_state,
                 warmup_iterations + batch * iterations + iteration,
             ));
@@ -1208,7 +1207,7 @@ fn renderIteration(
     form_state: *BenchmarkFormState,
     text_input: *tui.widget.TextInput,
     text_area: *tui.widget.TextArea,
-    assistant: *assistant_demo.AssistantApp,
+    portfolio: *demo_app.DemoApp,
     data_state: *BenchmarkDataState,
     iteration: usize,
 ) !tui.render.FrameStats {
@@ -1353,18 +1352,15 @@ fn renderIteration(
             var surface = frame.surface(.{ .x = 4, .y = 4, .width = 24, .height = 20 });
             try text_area.draw(&surface);
         },
-        .assistant_cycle => {
-            if (!assistant.streaming) {
-                if (assistant.handle(.{ .text = "benchmark" }) != .redraw) unreachable;
-                if (assistant.handle(.{ .key = .{
-                    .code = .{ .codepoint = 's' },
-                    .modifiers = .{ .control = true },
-                } }) != .redraw) unreachable;
-            }
-            while (assistant.streamStep() != .redraw) {}
+        .demo_cycle => {
+            const update = portfolio.handle(.{ .key = .{
+                .code = if (iteration & 1 == 0) .right else .left,
+                .modifiers = .{ .alt = true },
+            } });
+            if (update != .redraw) unreachable;
             var frame = renderer.frame();
             var surface = frame.surface(.{ .x = 0, .y = 0, .width = 80, .height = 24 });
-            try assistant.draw(&surface);
+            try portfolio.draw(&surface);
         },
         .scrollback_view => {
             var scrollback = tui.widget.Scrollback(BenchmarkListProvider){
