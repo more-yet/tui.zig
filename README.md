@@ -66,9 +66,11 @@ platform shared library. The v1 ABI covers the renderer, widgets, editors,
 provider-backed collections, charts, input parser, and bounded event queue.
 
 All exported symbols end in `_v1`. Owned objects use matching create/destroy
-functions. UTF-8 and provider data are borrowed only for the documented call;
-event queue pushes copy at most 256 payload bytes. Renderer image pixels remain
-borrowed until successful presentation.
+functions and allocate exclusively through the required caller-supplied
+`tui_allocator_v1`. The callback table is copied into each owned handle. UTF-8
+and provider data are borrowed only for the documented call; event queue pushes
+copy at most 256 payload bytes. Renderer image pixels remain borrowed until
+successful presentation.
 Language-specific bindings can be layered over this ABI and released independently.
 
 ```sh

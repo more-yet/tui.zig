@@ -1,7 +1,18 @@
 #include "tui.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+static void *allocate(void *, uint64_t size, uint64_t alignment) {
+    if (size > SIZE_MAX || alignment == 0 || alignment > alignof(std::max_align_t)) return nullptr;
+    return std::malloc(static_cast<size_t>(size));
+}
+
+static void deallocate(void *, void *memory, uint64_t, uint64_t) {
+    std::free(memory);
+}
 
 static tui_result_v1 write_output(void *context, const uint8_t *, uint64_t len) {
     *static_cast<uint64_t *>(context) += len;
@@ -9,8 +20,9 @@ static tui_result_v1 write_output(void *context, const uint8_t *, uint64_t len) 
 }
 
 int main() {
+    tui_allocator_v1 allocator{nullptr, allocate, deallocate};
     tui_renderer_v1 *renderer = nullptr;
-    if (tui_renderer_create_v1(tui_size_v1{8, 1}, nullptr, &renderer) != TUI_OK_V1) return 1;
+    if (tui_renderer_create_v1(&allocator, tui_size_v1{8, 1}, nullptr, &renderer) != TUI_OK_V1) return 1;
     if (tui_renderer_begin_frame_v1(renderer) != TUI_OK_V1) return 2;
     tui_text_desc_v1 label{};
     const char value[] = "C++";
