@@ -819,6 +819,35 @@ test "mouse wheel events do not report a pressed button" {
     try std.testing.expectEqual(event.MouseButton.none, collector.last_mouse.?.button);
 }
 
+test "SGR mouse reports button motion and release for drag selection" {
+    var parser: Parser = .{};
+    var collector: Collector = .{};
+
+    try parser.feed("\x1b[<0;3;4M", &collector);
+    try std.testing.expectEqual(event.Mouse{
+        .x = 2,
+        .y = 3,
+        .button = .left,
+        .action = .press,
+    }, collector.last_mouse.?);
+
+    try parser.feed("\x1b[<32;7;4M", &collector);
+    try std.testing.expectEqual(event.Mouse{
+        .x = 6,
+        .y = 3,
+        .button = .left,
+        .action = .move,
+    }, collector.last_mouse.?);
+
+    try parser.feed("\x1b[<0;7;4m", &collector);
+    try std.testing.expectEqual(event.Mouse{
+        .x = 6,
+        .y = 3,
+        .button = .none,
+        .action = .release,
+    }, collector.last_mouse.?);
+}
+
 test "sink failures reset parser protocol state" {
     const Scenario = struct {
         bytes: []const u8,

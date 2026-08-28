@@ -71,11 +71,37 @@ functions and allocate exclusively through the required caller-supplied
 and provider data are borrowed only for the documented call; event queue pushes
 copy at most 256 payload bytes. Renderer image pixels remain borrowed until
 successful presentation.
-Language-specific bindings can be layered over this ABI and released independently.
 
 ```sh
 zig build test-c-abi
 ```
+
+## Language Bindings
+
+The repository includes complete bindings for all 61 v1 C ABI exports. The
+native library is built once with Zig and loaded by each language; the bindings
+do not embed a second renderer or application framework.
+
+| Binding | Toolchain | Owned handles |
+| --- | --- | --- |
+| Rust | Rust 1.98 | RAII wrappers with `Drop` |
+| Go | Go 1.27 | Explicit `Close` methods |
+| Python | Python 3.11+ and uv | Context managers and `close` |
+| .NET | .NET SDK 8 | `SafeHandle` wrappers |
+| Node.js | Node.js 26 and npm | External handles with explicit destroy operations |
+
+Build the native library and every binding, or run every binding test and its
+deterministic ABI fixture with:
+
+```sh
+zig build bindings -Doptimize=ReleaseSafe
+zig build test-bindings -Doptimize=ReleaseSafe
+```
+
+`test-bindings` also checks the C fixture. Every binding renders the same two
+`80x24` frames and must report `3ef79199ac9f474c 8008` in
+`--headless-hash` mode. SDK-dependent steps are opt-in; the normal core test
+suite does not require the language toolchains.
 
 ## Headless App
 
@@ -108,31 +134,18 @@ test "app" {
 
 ## Examples
 
-Run the basic terminal demo:
+Run the interactive native Zig portfolio:
 
 ```sh
 zig build demo
 ```
 
-Run a command in the process console:
-
-```sh
-zig build process-console -- /bin/ls -la
-```
-
-Run the coding-assistant example:
-
-```sh
-zig build assistant-demo
-```
-
-Validate Kitty image presentation and removal in a compatible terminal:
-
-```sh
-zig build kitty-image-smoke
-```
-
-The examples use the same public modules and callbacks as normal applications.
+The tabbed demo exercises charts, form controls, provider-backed data widgets,
+multiline editing and selection, scrollback, terminal capabilities, mouse input,
+and incremental drawing. It reports update, draw, present, and total frame times,
+and adapts its ANSI-16 accents to the detected terminal background. Use
+`Alt+1`-`Alt+5`, `Alt+Left`/`Alt+Right`, or the mouse to switch tabs, and
+`Ctrl+Q` or `Esc` to quit.
 
 ## Modules
 
@@ -190,6 +203,8 @@ The examples use the same public modules and callbacks as normal applications.
 ```sh
 zig build test
 zig build test-c-abi
+zig build test-showcase
+zig build test-bindings -Doptimize=ReleaseSafe
 zig build unicode-check
 zig build example
 zig build bench

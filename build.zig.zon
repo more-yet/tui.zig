@@ -12,6 +12,7 @@
         "README.md",
         "SECURITY.md",
         "bench",
+        "bindings",
         "examples",
         "include",
         "src",

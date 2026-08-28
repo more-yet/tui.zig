@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const tui = @import("tui");
 
 const ok: i32 = 0;
@@ -34,6 +35,7 @@ pub const tui_parser_v1 = opaque {};
 pub const CVersion = extern struct { major: u32, minor: u32, patch: u32 };
 pub const CBytes = extern struct { ptr: [*c]const u8, len: u64 };
 pub const CSize = extern struct { width: u16, height: u16 };
+const CSizeArgument = if (builtin.cpu.arch == .aarch64) u32 else CSize;
 pub const CPoint = extern struct { x: u16, y: u16 };
 pub const CRect = extern struct { x: u16, y: u16, width: u16, height: u16 };
 pub const CColor = extern struct {
@@ -399,6 +401,11 @@ fn themeState(enabled: u8, focused: u8) tui.theme.State {
     return tui.theme.State.from(enabled != 0, focused != 0);
 }
 
+fn sizeArgument(value: CSizeArgument) CSize {
+    // Zig 0.16 mislowers four-byte extern struct arguments on AArch64.
+    return if (comptime builtin.cpu.arch == .aarch64) @bitCast(value) else value;
+}
+
 fn mapError(err: anyerror) i32 {
     return switch (err) {
         error.OutOfMemory => out_of_memory,
@@ -615,9 +622,10 @@ pub export fn tui_abi_version_v1() callconv(.c) CVersion {
     return .{ .major = 1, .minor = 0, .patch = 0 };
 }
 
-pub export fn tui_renderer_create_v1(allocator_value: ?*const CAllocator, size: CSize, config: ?*const CRendererConfig, out: ?*?*tui_renderer_v1) callconv(.c) i32 {
+pub export fn tui_renderer_create_v1(allocator_value: ?*const CAllocator, size_value: CSizeArgument, config: ?*const CRendererConfig, out: ?*?*tui_renderer_v1) callconv(.c) i32 {
     const output = out orelse return invalid_argument;
     output.* = null;
+    const size = sizeArgument(size_value);
     const limits: tui.render.Limits = if (config) |value| .{
         .max_cells = std.math.cast(usize, value.max_cells) orelse return invalid_argument,
         .grapheme_capacity = value.grapheme_capacity,
@@ -643,8 +651,9 @@ pub export fn tui_renderer_destroy_v1(value: ?*tui_renderer_v1) callconv(.c) voi
     destroyHandle(handle);
 }
 
-pub export fn tui_renderer_resize_v1(value: ?*tui_renderer_v1, size: CSize) callconv(.c) i32 {
+pub export fn tui_renderer_resize_v1(value: ?*tui_renderer_v1, size_value: CSizeArgument) callconv(.c) i32 {
     const handle = rendererHandle(value orelse return invalid_argument);
+    const size = sizeArgument(size_value);
     handle.renderer.resize(.{ .width = size.width, .height = size.height }) catch |err| return mapError(err);
     handle.frame_active = false;
     return ok;
@@ -1077,7 +1086,8 @@ pub export fn tui_text_area_destroy_v1(value: ?*tui_text_area_v1) callconv(.c) v
     destroyHandle(handle);
 }
 
-pub export fn tui_text_area_layout_v1(value: ?*tui_text_area_v1, size: CSize) callconv(.c) i32 {
+pub export fn tui_text_area_layout_v1(value: ?*tui_text_area_v1, size_value: CSizeArgument) callconv(.c) i32 {
+    const size = sizeArgument(size_value);
     _ = textAreaHandle(value orelse return invalid_argument).area.layout(.{ .width = size.width, .height = size.height });
     return ok;
 }

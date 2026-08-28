@@ -79,3 +79,91 @@ jobs:
           zig build example -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe
           zig build example -Dtarget=x86_64-macos-none -Doptimize=ReleaseSafe
           zig build example -Dtarget=aarch64-macos-none -Doptimize=ReleaseSafe
+
+  bindings:
+    name: Bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-14
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.0
+      TUI_LIBRARY_DIR: ${{ github.workspace }}/zig-out/lib
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)
+              target='x86_64-linux'
+              checksum='70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
+              ;;
+            macOS-X64)
+              target='x86_64-macos'
+              checksum='0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7'
+              ;;
+            macOS-ARM64)
+              target='aarch64-macos'
+              checksum='b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489'
+              ;;
+            *)
+              printf 'unsupported runner: %s-%s\n' "${RUNNER_OS}" "${RUNNER_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+          archive="${RUNNER_TEMP}/zig-0.16.0.tar.xz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors \
+            --output "${archive}" \
+            "https://ziglang.org/download/0.16.0/zig-${target}-0.16.0.tar.xz"
+          if [[ "${RUNNER_OS}" == 'Linux' ]]; then
+            printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check --strict
+          else
+            actual="$(shasum -a 256 "${archive}")"
+            test "${actual%% *}" = "${checksum}"
+          fi
+          tar --extract --xz --file "${archive}" --directory "${RUNNER_TEMP}"
+          printf '%s\n' "${RUNNER_TEMP}/zig-${target}-0.16.0" >> "${GITHUB_PATH}"
+
+      - name: Install Rust 1.98.0
+        run: rustup toolchain install 1.98.0 --profile minimal --no-self-update
+
+      - name: Install Go 1.27.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: bindings/go/go.mod
+          cache-dependency-path: bindings/go/go.sum
+
+      - name: Install Node.js 26.7.0
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 26.7.0
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Install .NET SDK 8.0.424
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 8.0.424
+
+      - name: Install uv 0.12.5
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: 0.12.5
+          enable-cache: true
+          cache-dependency-glob: bindings/python/uv.lock
+
+      - name: Test bindings and showcases
+        run: zig build test-bindings -Doptimize=ReleaseSafe

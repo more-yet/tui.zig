@@ -53,7 +53,6 @@ pub const TextArea = struct {
         const state = theme.State.from(self.enabled, self.focused);
         const base_style = self.role.resolve(state);
         const selected_style = self.selection_role.resolve(state);
-        try surface.fill(render.Rect.fromSize(size), base_style);
 
         if (self.model.softWrapEnabled()) {
             try self.drawSoftRows(surface, base_style, selected_style);
@@ -96,6 +95,9 @@ pub const TextArea = struct {
                 const relative_end = std.mem.indexOfScalar(u8, value[line_start..], '\n') orelse value.len - line_start;
                 line_end = line_start + relative_end;
             }
+        }
+        if (y < size.height) {
+            try surface.fill(.{ .x = 0, .y = y, .width = size.width, .height = size.height - y }, base_style);
         }
     }
 
@@ -149,6 +151,9 @@ pub const TextArea = struct {
                 );
             }
         }
+        if (y < surface.size().height) {
+            try surface.fill(.{ .x = 0, .y = y, .width = surface.size().width, .height = surface.size().height - y }, base_style);
+        }
     }
 
     fn drawLine(
@@ -163,8 +168,34 @@ pub const TextArea = struct {
     ) !?u16 {
         const line = self.model.value()[line_start..line_end];
         const left = self.model.viewport.left_column;
+        const ascii = printableAscii(line);
+        const selected_bytes_in_line = if (selection) |selected|
+            selected.start < line_end and selected.end > line_start
+        else
+            false;
+        const selected_newline = if (selection) |selected|
+            line_end < self.model.value().len and selected.start <= line_end and selected.end > line_end
+        else
+            false;
+        if (left == 0 and !selected_bytes_in_line and !selected_newline) {
+            if (ascii) {
+                _ = try surface.putTextLine(
+                    .{ .x = 0, .y = y },
+                    line,
+                    surface.size().width,
+                    base_style,
+                    self.model.width_profile,
+                    .{},
+                );
+            } else {
+                try surface.fill(.{ .x = 0, .y = y, .width = surface.size().width, .height = 1 }, base_style);
+                _ = try surface.putText(.{ .x = 0, .y = y }, line, base_style, self.model.width_profile);
+            }
+            return null;
+        }
+
         var column: usize = line.len;
-        var visible_start: ?usize = if (printableAscii(line) and left <= line.len) left else null;
+        var visible_start: ?usize = if (ascii and left <= line.len) left else null;
         var x: usize = 0;
         if (visible_start == null) {
             var iterator = text.GraphemeIterator.init(line) catch unreachable;
@@ -187,7 +218,28 @@ pub const TextArea = struct {
             }
             if (visible_start == null and left == column) visible_start = line.len;
         }
-        const start = visible_start orelse return null;
+        const start = visible_start orelse {
+            try surface.fill(.{ .x = 0, .y = y, .width = surface.size().width, .height = 1 }, base_style);
+            return null;
+        };
+        const selected_bytes = if (selection) |selected|
+            @min(@max(selected.start, line_start + start), line_end) < @min(@max(selected.end, line_start + start), line_end)
+        else
+            false;
+        if (ascii and !selected_bytes) {
+            _ = try surface.putTextLine(
+                .{ .x = 0, .y = y },
+                line[start..],
+                surface.size().width,
+                base_style,
+                self.model.width_profile,
+                .{},
+            );
+            if (column < left or column - left >= surface.size().width) return null;
+            return @intCast(column - left);
+        }
+
+        try surface.fill(.{ .x = 0, .y = y, .width = surface.size().width, .height = 1 }, base_style);
         if (x < surface.size().width and start < line.len) {
             var byte = line_start + start;
             if (selection) |selected| {

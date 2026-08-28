@@ -6,6 +6,14 @@ zig-out/
 .env.*
 .envrc
 .direnv/
+bindings/**/.venv/
+bindings/**/__pycache__/
+bindings/**/target/
+bindings/**/node_modules/
+bindings/**/bin/
+bindings/**/obj/
+bindings/**/build/
+bindings/**/dist/
 *.age
 *.jks
 *.kdbx
