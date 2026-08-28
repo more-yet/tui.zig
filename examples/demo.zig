@@ -276,10 +276,6 @@ pub const DemoApp = struct {
         return true;
     }
 
-    pub fn setCapabilities(self: *DemoApp, capabilities: tui.terminal.Capabilities) void {
-        self.capabilities = capabilities;
-    }
-
     pub fn layout(self: *DemoApp, size: tui.render.Size) void {
         const width = @min(size.width, workspace_width);
         const x = (size.width - width) / 2;
@@ -525,7 +521,7 @@ pub const DemoApp = struct {
         const bounds = self.pageBounds();
         try drawSection(surface, bounds, "Demo preferences", theme, theme.accent, true);
         const form = widgetsFormLayout(preferencesBounds(bounds), self.spacing_selection == 1);
-        self.drawTextInput(surface, form.first, theme) catch |err| return err;
+        try self.drawTextInput(surface, form.first, theme);
         try self.drawFormControls(surface, form, theme);
     }
 
@@ -568,7 +564,10 @@ pub const DemoApp = struct {
             .focused = self.widgets_focus == 3,
             .role = .{ .normal = theme.canvas, .focused = theme.accent },
         };
-        const radio_b_rect = offsetRow(form_layout.third, 1);
+        const radio_b_rect = if (form_layout.third.height > 1)
+            tui.render.Rect{ .x = form_layout.third.x, .y = form_layout.third.y + 1, .width = form_layout.third.width, .height = 1 }
+        else
+            empty_rect;
         radio_surface = surface.surface(radio_b_rect);
         try radio_b.draw(&radio_surface);
         var button = tui.widget.Button{
@@ -1054,26 +1053,12 @@ fn sizeIsEmpty(size: tui.render.Size) bool {
     return size.width == 0 or size.height == 0;
 }
 
-fn offsetRow(rect: tui.render.Rect, offset: u16) tui.render.Rect {
-    if (offset >= rect.height) return empty_rect;
-    return .{ .x = rect.x, .y = rect.y + offset, .width = rect.width, .height = 1 };
-}
-
 fn preferencesBounds(section: tui.render.Rect) tui.render.Rect {
     var bounds = inset(section);
     const width = @min(bounds.width, 72);
     bounds.x += (bounds.width - width) / 2;
     bounds.width = width;
     return bounds;
-}
-
-fn twoColumns(bounds: tui.render.Rect) PageLayout {
-    const gap: u16 = @intFromBool(bounds.width > 2);
-    const left = (bounds.width - gap) / 2;
-    return .{
-        .first = .{ .x = bounds.x, .y = bounds.y, .width = left, .height = bounds.height },
-        .second = .{ .x = bounds.x + left + gap, .y = bounds.y, .width = bounds.width - left - gap, .height = bounds.height },
-    };
 }
 
 fn overviewLayout(bounds: tui.render.Rect) PageLayout {
@@ -1186,10 +1171,6 @@ fn nsToMs(nanoseconds: u64) f64 {
     return @as(f64, @floatFromInt(nanoseconds)) / std.time.ns_per_ms;
 }
 
-fn addDurations(update_ns: u64, draw_ns: u64, present_ns: u64) u64 {
-    return update_ns +| draw_ns +| present_ns;
-}
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const stdin = std.Io.File.stdin();
@@ -1243,11 +1224,9 @@ pub fn main(init: std.process.Init) !void {
             const present_end = std.Io.Clock.awake.now(io);
             application.metrics.draw_ns = durationNs(draw_start, draw_end);
             application.metrics.present_ns = durationNs(present_start, present_end);
-            application.metrics.total_ns = addDurations(
-                application.metrics.update_ns,
-                application.metrics.draw_ns,
-                application.metrics.present_ns,
-            );
+            application.metrics.total_ns = application.metrics.update_ns +|
+                application.metrics.draw_ns +|
+                application.metrics.present_ns;
             application.metrics.frame = stats;
             changed = false;
         }
@@ -1270,21 +1249,17 @@ pub fn main(init: std.process.Init) !void {
         }
         try runtime.step(&sink);
         switch (control) {
-            .none => {},
+            .none => continue,
             .suspend_requested => {
                 try session.leave(output);
                 try signals.suspendProcess();
                 try session.reenter(output);
-                try negotiator.writeQueries(output);
-                renderer.invalidateTerminal();
-                changed = true;
             },
-            .continued => {
-                try negotiator.writeQueries(output);
-                renderer.invalidateTerminal();
-                changed = true;
-            },
+            .continued => {},
         }
+        try negotiator.writeQueries(output);
+        renderer.invalidateTerminal();
+        changed = true;
     }
     try session.leave(output);
 }
@@ -1303,7 +1278,7 @@ const DemoSink = struct {
             .input => |value| {
                 const start = std.Io.Clock.awake.now(self.io);
                 self.negotiator.observe(value);
-                self.application.setCapabilities(self.negotiator.capabilities);
+                self.application.capabilities = self.negotiator.capabilities;
                 if (self.negotiator.observations.default_background) |background| {
                     if (self.application.setTerminalBackground(background)) self.changed.* = true;
                 }

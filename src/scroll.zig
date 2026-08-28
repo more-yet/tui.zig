@@ -344,18 +344,7 @@ fn nextIndex(index: usize, capacity: usize) usize {
 }
 
 fn copyLine(destination: []u8, source: []const u8) void {
-    if (source.len == 0 or destination.ptr == source.ptr) return;
-    const destination_start = @intFromPtr(destination.ptr);
-    const source_start = @intFromPtr(source.ptr);
-    const separated = if (destination_start < source_start)
-        source_start - destination_start >= source.len
-    else
-        destination_start - source_start >= source.len;
-    if (separated) {
-        @memcpy(destination, source);
-    } else {
-        @memmove(destination, source);
-    }
+    @memmove(destination, source);
 }
 
 fn maxTop(total_rows: usize, visible_rows: u16) usize {
