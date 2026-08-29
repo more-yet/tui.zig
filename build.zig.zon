@@ -1,6 +1,6 @@
 .{
     .name = .tui,
-    .version = "1.0.0-rc.1",
+    .version = "1.0.0-rc.2",
     .fingerprint = 0xca9f4dd1bc7afb3c,
     .minimum_zig_version = "0.16.0",
     .paths = .{
