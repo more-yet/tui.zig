@@ -26,7 +26,7 @@ its event loop.
 
 ## Status
 
-- Current version: `1.0.0-rc.2`
+- Current version: `1.0.0`
 - Zig version: `0.16.0`
 - Main platform: x86_64 Linux GNU
 - Preview platforms: Linux musl and macOS targets
