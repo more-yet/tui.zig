@@ -11,9 +11,7 @@ const buffer_too_small: i32 = -5;
 const queue_full: i32 = -6;
 const queue_empty: i32 = -7;
 const output_error: i32 = -8;
-const provider_error: i32 = -9;
 const invalid_state: i32 = -10;
-const unsupported: i32 = -11;
 const event_payload_capacity = 256;
 const provider_batch_capacity = 64;
 
@@ -419,14 +417,6 @@ fn mapError(err: anyerror) i32 {
 
 fn updateValue(value: tui.widget.Update) i32 {
     return @intFromEnum(value);
-}
-
-fn eventStatusValue(value: tui.editor.EventStatus) i32 {
-    return switch (value) {
-        .ignored => 0,
-        .handled => 1,
-        .redraw => 2,
-    };
 }
 
 fn toEvent(value: CEvent) !tui.input.Event {
