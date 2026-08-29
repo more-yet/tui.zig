@@ -352,15 +352,6 @@ class SamplesProvider(C.Structure):
     _fields_ = [("context", C.c_void_p), ("count", C.c_uint64), ("read", SamplesReadFn)]
 
 
-def _library_path() -> str:
-    configured = os.environ.get("TUI_LIBRARY")
-    if configured:
-        return str(Path(configured).expanduser().resolve(strict=True))
-    root = Path(__file__).resolve().parents[4]
-    name = "libtui.dylib" if os.uname().sysname == "Darwin" else "libtui.so.1.0.0"
-    return str((root / "zig-out" / "lib" / name).resolve(strict=True))
-
-
 def _load_library() -> C.CDLL:
     configured = os.environ.get("TUI_LIBRARY")
     if configured:
@@ -369,8 +360,13 @@ def _load_library() -> C.CDLL:
     try:
         return C.CDLL(name)
     except OSError as load_error:
+        root = Path(__file__).resolve().parents[4]
+        fallback_name = (
+            "libtui.dylib" if os.uname().sysname == "Darwin" else "libtui.so.1.0.0"
+        )
+        fallback = root / "zig-out" / "lib" / fallback_name
         try:
-            return C.CDLL(_library_path())
+            return C.CDLL(str(fallback.resolve(strict=True)))
         except (OSError, FileNotFoundError):
             raise load_error
 
