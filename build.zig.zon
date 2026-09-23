@@ -1,0 +1,29 @@
+.{
+    .name = .tui,
+    .version = "0.1.0",
+    .fingerprint = 0xca9f4dd1bc7afb3c,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Pinned native terminal engine for the opt-in test suite.
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/f9a3f24a56bf05f70894e1a084809d4fffadf420.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBCwGGcgUfw6oYuprAOqYGmiKovuUlKdAcsdkUr7zM",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        ".gitignore",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "LICENSES",
+        "README.md",
+        "GRAPHICS.md",
+        "SECURITY.md",
+        "bench",
+        "examples",
+        "src",
+        "test",
+        "tools",
+    },
+}

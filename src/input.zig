@@ -1,0 +1,13 @@
+pub const Event = @import("input/event.zig").Event;
+pub const OwnedEvent = @import("input/event.zig").OwnedEvent;
+pub const OwnedEventError = @import("input/event.zig").OwnedEventError;
+pub const Key = @import("input/event.zig").Key;
+pub const KeyCode = @import("input/event.zig").KeyCode;
+pub const KeyAction = @import("input/event.zig").KeyAction;
+pub const Modifiers = @import("input/event.zig").Modifiers;
+pub const Mouse = @import("input/event.zig").Mouse;
+pub const MouseButton = @import("input/event.zig").MouseButton;
+pub const MouseAction = @import("input/event.zig").MouseAction;
+pub const CursorPosition = @import("input/event.zig").CursorPosition;
+pub const TerminalReply = @import("input/event.zig").TerminalReply;
+pub const Parser = @import("input/parser.zig").Parser;

@@ -1,0 +1,11 @@
+pub const Capabilities = @import("terminal/capabilities.zig").Capabilities;
+pub const CapabilityObservations = @import("terminal/capabilities.zig").Observations;
+pub const CapabilityProfile = @import("terminal/capabilities.zig").Profile;
+pub const CapabilitySupport = @import("terminal/capabilities.zig").FeatureSupport;
+pub const ColorDepth = @import("terminal/capabilities.zig").ColorDepth;
+pub const CapabilityNegotiator = @import("terminal/capabilities.zig").Negotiator;
+pub const GraphicsProbeFailure = @import("terminal/capabilities.zig").ProbeFailure;
+pub const Session = @import("terminal/posix.zig").Session;
+pub const SessionOptions = @import("terminal/posix.zig").Options;
+pub const EmergencyRestoreResult = @import("terminal/posix.zig").EmergencyRestoreResult;
+pub const querySize = @import("terminal/posix.zig").querySize;
