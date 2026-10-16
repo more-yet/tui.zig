@@ -42,8 +42,7 @@ pub const History = struct {
     active_transaction: ?u64 = null,
     transaction_depth: usize = 0,
 
-    /// Caller-owned record and byte storage must remain fixed and disjoint for
-    /// the history lifetime.
+    /// Keep record and byte slices fixed, disjoint, and alive until history is released.
     pub fn init(records: []Record, bytes: []u8) Error!History {
         if (memory.slicesOverlap(std.mem.sliceAsBytes(records), bytes)) return error.OverlappingStorage;
         return .{ .records = records, .bytes = bytes };
@@ -143,7 +142,7 @@ pub const History = struct {
         self.records[index].after = after;
     }
 
-    /// Returned edit slices remain borrowed until the next history mutation.
+    /// Copy returned edits before mutating history if retaining them.
     pub fn peekUndo(self: *const History) ?Edit {
         if (!self.canUndo()) return null;
         return self.view(self.records[self.cursor - 1]);
@@ -154,7 +153,7 @@ pub const History = struct {
         self.cursor -= 1;
     }
 
-    /// Returned edit slices remain borrowed until the next history mutation.
+    /// Copy returned edits before mutating history if retaining them.
     pub fn peekRedo(self: *const History) ?Edit {
         if (!self.canRedo()) return null;
         return self.view(self.records[self.cursor]);

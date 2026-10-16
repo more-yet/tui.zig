@@ -1,21 +1,15 @@
 const std = @import("std");
 const input = @import("../input/event.zig");
 
-/// Pinned protocol target: Kitty graphics protocol as documented on 2026-09-16.
-/// Wire behavior was audited against kitty commit
-/// 87ab3e98f4d399337777e4329960d7cd09101e99.
 pub const specification_revision = "2026-09-16";
 pub const specification_source =
     "https://github.com/kovidgoyal/kitty/blob/87ab3e98f4d399337777e4329960d7cd09101e99/docs/graphics-protocol.rst";
-/// Maximum encoded control header supported by `Sender`.
 pub const max_control_bytes = 480;
 
 pub const ResponseMode = enum(u2) {
-    /// Request success and error replies.
     all = 0,
-    /// Suppress successful `OK` replies.
+    /// Reports errors but suppresses successful `OK` replies.
     errors_only = 1,
-    /// Suppress all replies.
     none = 2,
 };
 
@@ -147,7 +141,7 @@ pub const AnimationControl = struct {
     frame: u32 = 0,
     gap_ms: i32 = 0,
     current_frame: u32 = 0,
-    /// Wire semantics: 0 leaves unchanged, 1 loops forever, n>1 performs n-1 loops.
+    /// 0: unchanged; 1: forever; n > 1: n - 1 loops.
     loops: u32 = 0,
 };
 
@@ -193,7 +187,6 @@ pub const EncodeContext = struct {
 
 pub const EncodeError = error{ BufferTooSmall, InvalidCommand };
 
-/// Checks field combinations that are invalid independently of payload bytes.
 pub fn validate(command: Command) error{InvalidCommand}!void {
     switch (command) {
         .transmit => |value| try validateIdentifiers(value.transmission.identifiers, false),
@@ -244,7 +237,7 @@ fn validateDelete(selector: DeleteSelector) error{InvalidCommand}!void {
     }
 }
 
-/// Encodes only APC control data. Payload framing and base64 belong to Sender.
+/// Encodes control fields only. Use `Sender` for complete framed commands.
 pub fn encodeControl(output: []u8, command: Command, context: EncodeContext) EncodeError![]const u8 {
     try validate(command);
     if (context.more_chunks) {
@@ -325,7 +318,7 @@ pub fn encodeControl(output: []u8, command: Command, context: EncodeContext) Enc
 const Builder = struct {
     buffer: []u8,
     len: usize = 0,
-    fields: usize = 0,
+    has_fields: bool = false,
 
     fn written(self: *const Builder) []const u8 {
         return self.buffer[0..self.len];
@@ -338,22 +331,22 @@ const Builder = struct {
     }
 
     fn fieldPrefix(self: *Builder, key: u8) EncodeError!void {
-        if (self.fields != 0) try self.append(",");
+        if (self.has_fields) try self.append(",");
         try self.append(&.{ key, '=' });
-        self.fields += 1;
+        self.has_fields = true;
     }
 
-    fn fieldUnsigned(self: *Builder, key: u8, value: anytype) EncodeError!void {
+    fn fieldUnsigned(self: *Builder, key: u8, value: u32) EncodeError!void {
         try self.fieldPrefix(key);
-        var storage: [20]u8 = undefined;
-        const bytes = std.fmt.bufPrint(&storage, "{d}", .{value}) catch return error.BufferTooSmall;
+        var storage: [10]u8 = undefined;
+        const bytes = std.fmt.bufPrint(&storage, "{d}", .{value}) catch unreachable;
         try self.append(bytes);
     }
 
     fn fieldSigned(self: *Builder, key: u8, value: i32) EncodeError!void {
         try self.fieldPrefix(key);
-        var storage: [16]u8 = undefined;
-        const bytes = std.fmt.bufPrint(&storage, "{d}", .{value}) catch return error.BufferTooSmall;
+        var storage: [11]u8 = undefined;
+        const bytes = std.fmt.bufPrint(&storage, "{d}", .{value}) catch unreachable;
         try self.append(bytes);
     }
 
@@ -472,7 +465,7 @@ pub const Reply = struct {
     frame: u32 = 0,
     unknown_fields: [max_unknown_fields]UnknownField = undefined,
     unknown_field_count: u4 = 0,
-    /// Borrows the terminal-reply input storage.
+    /// Copy before the parser's next operation if retaining the reply.
     message: []const u8,
     status: Status,
 
@@ -487,7 +480,6 @@ pub const Reply = struct {
     };
 
     pub const RemoteError = struct {
-        /// Both slices borrow the terminal-reply input storage.
         code: []const u8,
         message: []const u8,
     };

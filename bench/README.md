@@ -14,6 +14,7 @@ accepts at most 17 bytes per write. Transport workloads are finite and have a
 
 Focused performance scenarios include:
 
+- `focus_navigation`: target registration, sequential/directional focus, and hit-testing.
 - `identical_full_fill`: repeated unchanged styled full-screen fills.
 - `dense_same_style`: a full screen of changing, same-style ASCII text.
 - `intern_churn`: more unique glyph/style insertions over time than either
@@ -22,8 +23,7 @@ Focused performance scenarios include:
   near the final cached rows, with a selection on the final visual row.
 - `text_area_deep_unwrapped`: a horizontally scrolled viewport at the end of a
   1536-column unwrapped row; painting starts at the indexed visible window.
-- `nonblocking_pipe`: dense updates using the demo's poll/write/acknowledge
-  scheduling pattern.
+- `nonblocking_pipe`: dense updates with partial writes and readiness polling.
 - `resize` / `resize_large`: blank 119/120 × 40 and 239/240 × 80 dense-grid
   reset workloads. The reference budgets are 25 µs and 100 µs respectively;
   populated resize must be compared as a separate fixture because it also

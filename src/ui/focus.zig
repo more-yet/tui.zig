@@ -1,33 +1,21 @@
 const std = @import("std");
-const input = @import("input.zig");
-const render = @import("render.zig");
-const widget = @import("widget.zig");
+const render = @import("../render.zig");
 
 pub const Id = u32;
-const no_parent = std.math.maxInt(u16);
 
 pub const Target = struct {
     id: Id,
-    parent: ?Id = null,
     rect: render.Rect,
     focusable: bool = true,
     enabled: bool = true,
 };
 
-pub const Node = struct {
-    id: Id,
-    rect: render.Rect,
-    parent_index: u16,
-    focusable: bool,
-    enabled: bool,
-};
-
 pub const Registry = struct {
-    storage: []Node,
+    storage: []Target,
     len: u16 = 0,
 
-    pub fn init(storage: []Node) error{CapacityTooLarge}!Registry {
-        if (storage.len > no_parent) return error.CapacityTooLarge;
+    pub fn init(storage: []Target) error{CapacityTooLarge}!Registry {
+        if (storage.len > std.math.maxInt(u16)) return error.CapacityTooLarge;
         return .{ .storage = storage };
     }
 
@@ -38,58 +26,17 @@ pub const Registry = struct {
     pub fn add(self: *Registry, target: Target) error{
         CapacityExceeded,
         DuplicateId,
-        MissingParent,
     }!void {
         if (self.len == self.storage.len) return error.CapacityExceeded;
-        var parent_index: u16 = no_parent;
-        for (self.storage[0..self.len], 0..) |node, index| {
+        for (self.storage[0..self.len]) |node| {
             if (node.id == target.id) return error.DuplicateId;
-            if (target.parent != null and node.id == target.parent.?) parent_index = @intCast(index);
         }
-        if (target.parent != null and parent_index == no_parent) return error.MissingParent;
-        self.storage[self.len] = .{
-            .id = target.id,
-            .rect = target.rect,
-            .parent_index = parent_index,
-            .focusable = target.focusable,
-            .enabled = target.enabled,
-        };
+        self.storage[self.len] = target;
         self.len += 1;
     }
 
     pub inline fn count(self: *const Registry) usize {
         return self.len;
-    }
-
-    pub fn path(
-        self: *const Registry,
-        id: Id,
-        output: []Id,
-    ) error{ UnknownId, OutputTooSmall }![]Id {
-        return self.pathIndex(self.indexOf(id) orelse return error.UnknownId, output);
-    }
-
-    fn pathIndex(self: *const Registry, target_index: u16, output: []Id) error{OutputTooSmall}![]Id {
-        var index = target_index;
-        var depth: usize = 1;
-        while (self.storage[index].parent_index != no_parent) : (depth += 1) {
-            std.debug.assert(depth < self.len);
-            index = self.storage[index].parent_index;
-            std.debug.assert(index < self.len);
-        }
-        if (output.len < depth) return error.OutputTooSmall;
-
-        index = target_index;
-        var position = depth;
-        while (true) {
-            position -= 1;
-            const node = self.storage[index];
-            output[position] = node.id;
-            if (node.parent_index == no_parent) break;
-            index = node.parent_index;
-            std.debug.assert(index < self.len);
-        }
-        return output[0..depth];
     }
 
     pub fn hit(self: *const Registry, point: render.Point) ?Id {
@@ -232,51 +179,7 @@ pub const Manager = struct {
     }
 };
 
-pub const RouteResult = struct {
-    update: widget.Update = .ignored,
-    stop: bool = false,
-
-    pub inline fn continueWith(update: widget.Update) RouteResult {
-        return .{ .update = update };
-    }
-
-    pub inline fn stopWith(update: widget.Update) RouteResult {
-        return .{ .update = update, .stop = true };
-    }
-
-    pub inline fn merge(self: RouteResult, other: RouteResult) RouteResult {
-        return .{ .update = self.update.merge(other.update), .stop = self.stop or other.stop };
-    }
-};
-
-/// Routes one borrowed event through a root-to-target path without storing it.
-pub inline fn route(router: anytype, path: []const Id, event: input.Event) RouteResult {
-    if (path.len == 0) return .{};
-    const Router = switch (@typeInfo(@TypeOf(router))) {
-        .pointer => |pointer| pointer.child,
-        else => @compileError("focus.route expects a pointer to caller-owned router state"),
-    };
-    var result: RouteResult = .{};
-    if (@hasDecl(Router, "capture")) {
-        for (path[0 .. path.len - 1]) |id| {
-            result = result.merge(router.capture(id, event));
-            if (result.stop) return result;
-        }
-    }
-    result = result.merge(router.target(path[path.len - 1], event));
-    if (result.stop) return result;
-    if (@hasDecl(Router, "bubble")) {
-        var index = path.len - 1;
-        while (index != 0) {
-            index -= 1;
-            result = result.merge(router.bubble(path[index], event));
-            if (result.stop) return result;
-        }
-    }
-    return result;
-}
-
-inline fn eligible(node: Node) bool {
+inline fn eligible(node: Target) bool {
     return node.focusable and node.enabled and !node.rect.isEmpty();
 }
 

@@ -69,8 +69,7 @@ pub const Session = struct {
     current_command: Command = .none,
     command_offset: u8 = 0,
 
-    /// Captures terminal state without changing it. The descriptor and its flags
-    /// remain borrowed and must stay valid for the session lifetime.
+    /// Borrows the descriptor without changing terminal state. Keep it open until cleanup.
     pub fn init(input: std.Io.File, options: Options) !Session {
         const original = try getTermiosOnce(input.handle);
         return .{
@@ -81,7 +80,7 @@ pub const Session = struct {
         };
     }
 
-    /// Applies raw input mode once and schedules visual entry commands.
+    /// Enters raw mode; drive `outputStep()` to finish visual entry.
     pub fn beginEnter(self: *Session) !void {
         if (self.termios_restore_needed or self.terminal_restore_needed or self.transition != .idle) {
             return error.SessionActive;
@@ -93,7 +92,7 @@ pub const Session = struct {
         self.startTransition(.entering);
     }
 
-    /// Schedules visual restoration. A partially accepted command must be drained first.
+    /// Drain any partially written command before leaving; restore termios separately.
     pub fn beginLeave(self: *Session) !void {
         if (self.transition == .leaving) return;
         if (!self.terminal_restore_needed) return;
@@ -101,7 +100,6 @@ pub const Session = struct {
         self.startTransition(.leaving);
     }
 
-    /// Schedules a Kitty keyboard stack transition after capability negotiation.
     pub fn beginKittyKeyboard(self: *Session, enabled: bool) !void {
         if (!self.terminal_restore_needed) {
             self.kitty_keyboard_requested = enabled;
@@ -112,13 +110,12 @@ pub const Session = struct {
             self.kitty_keyboard_requested = enabled;
             return;
         }
-        if (self.command_offset != 0) return error.PartialOutputPending;
         self.kitty_keyboard_requested = enabled;
         self.kitty_target = enabled;
         self.startTransition(.kitty);
     }
 
-    /// Returns one stable, unaccepted command suffix without performing I/O.
+    /// Write the suffix, then `try session.consumeOutput(written)`; null means complete.
     pub fn outputStep(self: *Session) ?[]const u8 {
         while (true) {
             if (self.current_command != .none) {
@@ -139,7 +136,7 @@ pub const Session = struct {
         }
     }
 
-    /// Acknowledges exactly the bytes accepted by one output operation.
+    /// Pass only the actual accepted byte count, including partial writes.
     pub fn consumeOutput(self: *Session, count: usize) !void {
         if (self.current_command == .none) return error.NoSessionOutput;
         const bytes = commandBytes(self.current_command);
@@ -154,15 +151,14 @@ pub const Session = struct {
         self.transition_index += 1;
     }
 
-    /// Restores termios independently of visual output progress.
+    /// Call even when visual leave output fails.
     pub fn restoreTermios(self: *Session) !void {
         if (!self.termios_restore_needed) return;
         try setTermiosOnce(self.input.handle, self.original);
         self.termios_restore_needed = false;
     }
 
-    /// Terminates a partial control string, restores termios, and attempts one
-    /// bounded leave write. Preserves errno and the caller's Session state.
+    /// Last-resort restoration after output failure; one bounded write, no retries.
     pub fn emergencyRestore(self: *const Session, output_fd: std.posix.fd_t) EmergencyRestoreResult {
         const caller_errno = std.c._errno().*;
         defer std.c._errno().* = caller_errno;

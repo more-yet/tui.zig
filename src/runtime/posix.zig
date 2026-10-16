@@ -22,7 +22,7 @@ const InputProgress = struct {
     event: ?Event,
 };
 
-/// Input payload slices remain valid until the next runtime step.
+/// Copy input payloads before the next runtime step if retaining them.
 pub const Event = union(enum) {
     input: input.Event,
     input_failure: input.Parser.Failure,
@@ -76,7 +76,15 @@ pub const SignalOptions = struct {
 
 pub const InputTimeouts = struct {
     escape: std.Io.Duration = .fromMilliseconds(50),
+    /// Escape/UTF-8 sequence deadline; paste waits for its terminator or EOF.
     sequence: std.Io.Duration = .fromMilliseconds(250),
+};
+
+pub const InputState = struct {
+    /// Local bytes, parser outcomes, or EOF work remain without another read.
+    buffered_work: bool,
+    /// Incomplete framing may need more bytes or EOF; paste has no idle deadline.
+    pending: input.Parser.Pending,
 };
 
 pub const ResizeSource = struct {
@@ -135,7 +143,7 @@ pub const SignalSource = struct {
     owner_thread: std.Thread.Id,
     attached: bool = false,
 
-    /// Install before starting worker threads so they inherit the managed signal mask.
+    /// Initialize before workers; they must inherit the blocked signal mask.
     pub fn init(io: std.Io, options: SignalOptions) !SignalSource {
         const selected = selectedSignals(options);
         if (selected == 0) return error.NoSignalsSelected;
@@ -144,10 +152,25 @@ pub const SignalSource = struct {
         }
         errdefer signal_source_installed.store(false, .release);
 
-        return initSignalSourceLinux(io, options, selected);
+        var mask = std.posix.sigemptyset();
+        for (managed_signals) |signal| {
+            if (selected & signalBit(signal) != 0) std.posix.sigaddset(&mask, signal);
+        }
+        var old_mask: std.posix.sigset_t = undefined;
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, &old_mask);
+        errdefer std.posix.sigprocmask(std.posix.SIG.SETMASK, &old_mask, null);
+        const flags: u32 = std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC;
+        const fd = try std.posix.signalfd(-1, &mask, flags);
+        return .{
+            .io = io,
+            .options = options,
+            .descriptor_file = .{ .handle = fd, .flags = .{ .nonblocking = true } },
+            .old_mask = old_mask,
+            .owner_thread = std.Thread.getCurrentId(),
+        };
     }
 
-    /// The source must be detached and all worker threads stopped first.
+    /// Deinitialize the runtime and stop workers first; call on the initializing thread.
     pub fn deinit(self: *SignalSource) error{ WrongThread, SourceAttached }!void {
         if (self.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
         if (self.attached) return error.SourceAttached;
@@ -157,8 +180,7 @@ pub const SignalSource = struct {
         self.* = undefined;
     }
 
-    /// Stops the process with the default SIGTSTP action and rearms notification after continue.
-    /// Leave the terminal session before calling this method.
+    /// Leave the terminal session first; re-enter and redraw after continuation.
     pub fn suspendProcess(self: *SignalSource) !void {
         if (!self.options.suspend_resume) return error.SuspendUnavailable;
         if (!self.attached) return error.NotAttached;
@@ -204,25 +226,6 @@ const InputLifecycle = enum {
     ended,
 };
 
-fn initSignalSourceLinux(io: std.Io, options: SignalOptions, selected: u8) !SignalSource {
-    var mask = std.posix.sigemptyset();
-    for (managed_signals) |signal| {
-        if (selected & signalBit(signal) != 0) std.posix.sigaddset(&mask, signal);
-    }
-    var old_mask: std.posix.sigset_t = undefined;
-    std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, &old_mask);
-    errdefer std.posix.sigprocmask(std.posix.SIG.SETMASK, &old_mask, null);
-    const flags: u32 = std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC;
-    const fd = try std.posix.signalfd(-1, &mask, flags);
-    return .{
-        .io = io,
-        .options = options,
-        .descriptor_file = .{ .handle = fd, .flags = .{ .nonblocking = true } },
-        .old_mask = old_mask,
-        .owner_thread = std.Thread.getCurrentId(),
-    };
-}
-
 fn selectedSignals(options: SignalOptions) u8 {
     var result: u8 = 0;
     if (options.resize) result |= signal_resize;
@@ -258,12 +261,11 @@ const SharedWake = struct {
 pub const Notifier = struct {
     shared: *SharedWake,
 
-    /// Coalesces repeated notifications and never waits for event-counter capacity.
+    /// Publish shared state before waking. Repeated wakes coalesce.
     pub fn wake(self: Notifier) WakeError!void {
         try self.notify(wake_reason);
     }
 
-    /// Requests a resize probe on the runtime owner thread.
     pub fn requestResize(self: Notifier) WakeError!void {
         try self.notify(resize_reason);
     }
@@ -339,14 +341,14 @@ pub const Posix = struct {
         };
     }
 
-    /// All notifier users must stop before deinitialization.
+    /// Join all notifier users before deinitializing.
     pub fn deinit(self: *Posix) void {
         if (self.options.signals) |signals| signals.attached = false;
         self.wake_read.close(self.io);
         self.* = undefined;
     }
 
-    /// The runtime must remain at a fixed address while this handle is shared.
+    /// Keep runtime at a fixed address while sharing this handle.
     pub fn notifier(self: *Posix) Notifier {
         return .{ .shared = &self.shared_wake };
     }
@@ -384,21 +386,28 @@ pub const Posix = struct {
         return self.timer_count;
     }
 
-    /// Requests a resize probe without writing the wake event counter.
+    /// Owner-thread snapshot, not a kernel-queue check or proof of a fresh keypress.
+    /// Example: `const locally_idle = !state.buffered_work and state.pending == .none;`
+    pub fn inputState(self: *const Posix) InputState {
+        return .{
+            .buffered_work = self.input_start != self.input_end or self.parser.hasQueuedEvent() or
+                self.input_lifecycle == .draining or self.input_lifecycle == .eof_pending,
+            .pending = self.parser.pending(),
+        };
+    }
+
     pub fn requestResize(self: *Posix) error{ResizeUnavailable}!void {
         if (self.options.resize == null) return error.ResizeUnavailable;
         self.resize_requested = true;
     }
 
-    /// Blocks until one event is available. With no local work or deadline, the
-    /// owner thread sleeps in an indefinite readiness wait.
+    /// Waits for one event. Use when no application work is runnable.
     pub fn step(self: *Posix) !Event {
         var poll_storage: [3]PollSlot = undefined;
         return self.stepWithSources(&.{}, &poll_storage);
     }
 
-    /// Blocks until one runtime or caller-source event is available. With no
-    /// local work or deadline, the owner thread sleeps indefinitely.
+    /// Waits for one event. Allocate slots with `requiredPollSlots(sources.len)`.
     pub fn stepWithSources(
         self: *Posix,
         sources: []const PollSource,
@@ -410,9 +419,8 @@ pub const Posix = struct {
         }
     }
 
-    /// Performs one bounded, non-waiting runtime turn. Use this only to
-    /// interleave actual runnable work; it is not an idle-loop primitive.
-    /// `null` means this turn produced no event; buffered parser work may remain.
+    /// One non-waiting turn for interleaving runnable work; do not busy-poll while idle.
+    /// Null does not mean drained: inspect `inputState()` for remaining local work.
     pub fn pollWithSources(
         self: *Posix,
         sources: []const PollSource,
@@ -458,7 +466,7 @@ pub const Posix = struct {
         if (self.parser_deadline_ns) |deadline| {
             if (deadline <= now_ns) {
                 const result = switch (self.parser.pending()) {
-                    .none => input.Parser.Result{ .consumed = 0, .outcome = .need_more },
+                    .none, .paste => input.Parser.Result{ .consumed = 0, .outcome = .need_more },
                     .escape => self.parser.resolveEscape(),
                     .sequence => self.parser.cancelPending(),
                 };
@@ -493,8 +501,7 @@ pub const Posix = struct {
             };
         }
 
-        const local_input_work = self.parser.hasQueuedEvent() or
-            self.input_start != self.input_end or self.input_lifecycle == .draining;
+        const local_input_work = self.inputState().buffered_work;
         const timer_deadline_ns: ?i96 = if (self.timer_count == 0)
             null
         else
@@ -526,8 +533,7 @@ pub const Posix = struct {
         if (self.takeDueTimer(now_ns)) |event| return event;
         if (self.takeEof()) |event| return event;
 
-        const input_ready = self.parser.hasQueuedEvent() or
-            self.input_start != self.input_end or self.input_lifecycle == .draining or
+        const input_ready = local_input_work or
             self.input_lifecycle == .reading and poll_fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR) != 0;
         var ready_source: ?usize = null;
         if (sources.len != 0) {
@@ -671,7 +677,7 @@ pub const Posix = struct {
 
     fn updateParserDeadline(self: *Posix, now_ns: i96) !void {
         const timeout = switch (self.parser.pending()) {
-            .none => null,
+            .none, .paste => null,
             .escape => self.options.input_timeouts.escape,
             .sequence => self.options.input_timeouts.sequence,
         };
@@ -727,7 +733,6 @@ pub const Posix = struct {
     fn siftTimerDown(self: *Posix, raw_index: usize) void {
         var index = raw_index;
         while (true) {
-            if (index > (std.math.maxInt(usize) - 1) / 2) return;
             const left = index * 2 + 1;
             if (left >= self.timer_count) return;
             const right = left + 1;
@@ -768,8 +773,8 @@ fn pollOnce(fds: []std.posix.pollfd, timeout: i32) !usize {
 }
 
 fn readOnce(fd: std.posix.fd_t, buffer: []u8) !usize {
-    if (buffer.len == 0) return 0;
-    const result = std.posix.system.read(fd, buffer.ptr, @min(buffer.len, 0x7fff_f000));
+    std.debug.assert(buffer.len > 0 and buffer.len <= 0x7fff_f000);
+    const result = std.posix.system.read(fd, buffer.ptr, buffer.len);
     return switch (std.posix.errno(result)) {
         .SUCCESS => @intCast(result),
         .INTR => error.Interrupted,

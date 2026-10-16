@@ -3,7 +3,7 @@ const event = @import("event.zig");
 
 const paste_end = "\x1b[201~";
 
-/// Bracketed paste uses an in-band delimiter; it is framing, not authentication for ESC-bearing clipboard data.
+/// Paste delimiters are framing, not authentication of clipboard contents.
 pub const Parser = struct {
     pub const max_text_bytes = 4;
     pub const max_terminal_reply_bytes = 1_024;
@@ -14,6 +14,8 @@ pub const Parser = struct {
         none,
         escape,
         sequence,
+        /// Includes cancelled paste; never time out into ordinary key handling.
+        paste,
     };
 
     pub const Failure = enum {
@@ -38,11 +40,13 @@ pub const Parser = struct {
         csi,
         discard_csi,
         ss3,
+        linux_function,
         control_string,
         control_string_escape,
         discard_string,
         discard_string_escape,
         paste,
+        discard_paste,
         utf8,
         alt_utf8,
     };
@@ -61,8 +65,7 @@ pub const Parser = struct {
     pending_index: u2 = 0,
     pending_len: u2 = 0,
 
-    /// Consumes at most `input.len` bytes and returns at most one borrowed event.
-    /// Event payloads remain valid until the next parser operation.
+    /// Advance input by `result.consumed`. Copy retained events before the next parser call.
     pub fn next(self: *Parser, input: []const u8) Result {
         if (self.popPending(0)) |result| return result;
         self.preparePending();
@@ -78,7 +81,7 @@ pub const Parser = struct {
         return self.popPending(consumed) orelse .{ .consumed = consumed, .outcome = .need_more };
     }
 
-    /// Resolves a lone escape after the caller's escape deadline expires.
+    /// Call when the application's lone-Escape deadline expires.
     pub fn resolveEscape(self: *Parser) Result {
         if (self.popPending(0)) |result| return result;
         self.preparePending();
@@ -86,7 +89,7 @@ pub const Parser = struct {
         return self.popPending(0) orelse .{ .consumed = 0, .outcome = .need_more };
     }
 
-    /// Ends the byte stream and drains any final event or parse failure.
+    /// At EOF, drain final outcomes before discarding the parser.
     pub fn endInput(self: *Parser) Result {
         if (self.popPending(0)) |result| return result;
         self.preparePending();
@@ -94,7 +97,7 @@ pub const Parser = struct {
         return self.popPending(0) orelse .{ .consumed = 0, .outcome = .done };
     }
 
-    /// Cancels an incomplete sequence and reports it as a parse failure.
+    /// Reports one failure; cancelled paste keeps discarding until its terminator.
     pub fn cancelPending(self: *Parser) Result {
         if (self.popPending(0)) |result| return result;
         self.preparePending();
@@ -110,6 +113,7 @@ pub const Parser = struct {
 
     fn finish(self: *Parser) void {
         defer self.resetState();
+        if (self.state == .discard_paste) return;
         if (self.state == .escape) {
             self.state = .ground;
             self.emit(.{ .key = .{ .code = .escape } });
@@ -125,6 +129,7 @@ pub const Parser = struct {
         if (self.state != .ground) self.emit(.malformed);
     }
 
+    /// Reset only when no remaining bytes from the old stream will be delivered.
     pub fn reset(self: *Parser) void {
         self.resetState();
         self.pending_index = 0;
@@ -144,19 +149,24 @@ pub const Parser = struct {
         return switch (self.state) {
             .ground => .none,
             .escape => .escape,
+            .paste, .discard_paste => .paste,
             else => .sequence,
         };
     }
 
-    /// Reports a complete event or failure that `next` can return without
-    /// consuming another input byte.
+    /// When true, `next(&.{})` can return a queued event or failure.
     pub fn hasQueuedEvent(self: *const Parser) bool {
         return self.pending_index != self.pending_len;
     }
 
-    /// Cancels a caller-timed incomplete sequence and queues a malformed outcome.
     fn abort(self: *Parser) void {
-        if (self.state == .ground) return;
+        if (self.state == .ground or self.state == .discard_paste) return;
+        if (self.state == .paste) {
+            self.paste_len = 0;
+            self.state = .discard_paste;
+            self.emit(.malformed);
+            return;
+        }
         self.resetState();
         self.emit(.malformed);
     }
@@ -198,6 +208,7 @@ pub const Parser = struct {
                 }
             },
             .ss3 => self.consumeSs3(byte),
+            .linux_function => self.consumeLinuxFunction(byte),
             .control_string => self.consumeString(byte),
             .control_string_escape => {
                 if (byte == '\\') {
@@ -206,8 +217,6 @@ pub const Parser = struct {
                     self.state = .ground;
                     self.emit(.malformed);
                 } else {
-                    // Embedded ESC invalidates the payload. Keep framing until
-                    // BEL (OSC) or ST, including ST after consecutive ESC bytes.
                     self.state = if (byte == 0x1b) .discard_string_escape else .discard_string;
                 }
             },
@@ -221,7 +230,7 @@ pub const Parser = struct {
                     self.state = if (byte == 0x1b) .discard_string_escape else .discard_string;
                 }
             },
-            .paste => self.consumePaste(byte),
+            .paste, .discard_paste => self.consumePaste(byte),
             .utf8, .alt_utf8 => self.consumeUtf8(byte),
         }
     }
@@ -307,6 +316,10 @@ pub const Parser = struct {
             self.emit(.malformed);
             return;
         }
+        if (byte == '[' and self.sequence_len == 0) {
+            self.state = .linux_function;
+            return;
+        }
         if (isFinal(byte)) {
             const parameters = self.sequence[0..self.sequence_len];
             self.state = .ground;
@@ -356,6 +369,15 @@ pub const Parser = struct {
         self.emit(.{ .key = .{ .code = code } });
     }
 
+    fn consumeLinuxFunction(self: *Parser, byte: u8) void {
+        self.state = if (byte == 0x1b) .escape else .ground;
+        if (byte >= 'A' and byte <= 'E') {
+            self.emit(.{ .key = .{ .code = .{ .function = byte - 'A' + 1 } } });
+        } else {
+            self.emit(.malformed);
+        }
+    }
+
     fn consumeString(self: *Parser, byte: u8) void {
         if (self.string_kind == .osc and byte == 0x07) {
             self.finishString(byte);
@@ -391,26 +413,27 @@ pub const Parser = struct {
     }
 
     fn consumePaste(self: *Parser, byte: u8) void {
+        const discarding = self.state == .discard_paste;
         if (byte == paste_end[self.paste_match]) {
             self.paste_match += 1;
             if (self.paste_match == paste_end.len) {
                 self.paste_match = 0;
-                self.flushPaste();
+                if (!discarding) self.flushPaste();
                 self.state = .ground;
-                self.emit(.paste_end);
+                if (!discarding) self.emit(.paste_end);
             }
             return;
         }
 
         if (self.paste_match > 0) {
-            self.appendPaste(paste_end[0..self.paste_match]);
+            if (!discarding) self.appendPaste(paste_end[0..self.paste_match]);
             self.paste_match = 0;
             if (byte == paste_end[0]) {
                 self.paste_match = 1;
                 return;
             }
         }
-        self.appendPaste(&[1]u8{byte});
+        if (!discarding) self.appendPaste(&[1]u8{byte});
     }
 
     fn appendPaste(self: *Parser, bytes: []const u8) void {
@@ -498,6 +521,17 @@ pub const Parser = struct {
                 };
                 self.emit(.{ .key = .{
                     .code = code,
+                    .modifiers = metadata.modifiers,
+                    .action = metadata.action,
+                } });
+            },
+            'P', 'Q', 'S' => {
+                const metadata = csiKeyMetadata(parameters) orelse {
+                    self.emitReply(parameters, final);
+                    return;
+                };
+                self.emit(.{ .key = .{
+                    .code = .{ .function = if (final == 'S') 4 else final - 'P' + 1 },
                     .modifiers = metadata.modifiers,
                     .action = metadata.action,
                 } });

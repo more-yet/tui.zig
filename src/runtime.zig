@@ -2,6 +2,7 @@ const posix = @import("runtime/posix.zig");
 
 pub const Event = posix.Event;
 pub const InputTimeouts = posix.InputTimeouts;
+pub const InputState = posix.InputState;
 pub const Notifier = posix.Notifier;
 pub const Options = posix.Options;
 pub const Posix = posix.Posix;

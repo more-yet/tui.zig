@@ -5,7 +5,6 @@ pub const Boundary = struct {
     offset: usize,
 };
 
-/// Iterates Unicode default word boundaries without retaining or allocating input.
 pub const Iterator = struct {
     input: []const u8,
     index: usize = 0,

@@ -81,8 +81,7 @@ pub const TerminalReply = struct {
     raw: []const u8,
 };
 
-/// Slice payload lifetime is defined by the producer. Parser results remain
-/// valid until the next parser operation; use `OwnedEvent` to retain them.
+/// Parser payloads expire on its next operation. Use `OwnedEvent` to retain a copy.
 pub const Event = union(enum) {
     key: Key,
     text: []const u8,
@@ -99,7 +98,6 @@ pub const Event = union(enum) {
 
 pub const OwnedEventError = error{PayloadTooLarge};
 
-/// Owns the slice payload of an `Event` in fixed inline storage.
 pub fn OwnedEvent(comptime max_payload_bytes: usize) type {
     return struct {
         const Self = @This();
@@ -133,7 +131,7 @@ pub fn OwnedEvent(comptime max_payload_bytes: usize) type {
             return result;
         }
 
-        /// The returned payload borrows this value until it is moved or overwritten.
+        /// Keep this value unmoved and unchanged while using the returned event.
         pub fn borrow(self: *const Self) Event {
             return switch (self.metadata) {
                 .text => .{ .text = self.payload[0..self.payload_len] },

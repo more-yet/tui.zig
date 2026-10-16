@@ -13,8 +13,7 @@ pub const Options = struct {
     style: style_module.Style = .{},
 };
 
-/// Encodes one fully explicit placeholder grapheme: placeholder, row, column,
-/// and image-ID high byte. No inheritance state is used.
+/// Row and column are image-cell coordinates, each in 0...296.
 pub fn encodeCell(output: *[16]u8, row: u16, column: u16, image_id: u32) ![]const u8 {
     if (row >= coordinate_count or column >= coordinate_count) return error.CoordinateOutOfRange;
     var len: usize = 0;
@@ -41,11 +40,6 @@ pub fn placementColor(placement_id: u32) style_module.Color {
     } };
 }
 
-/// Exact protocol coordinate mapping derived from UnicodeData.txt 6.0.0.
-/// Canonical source: kitty commit 87ab3e98f4d399337777e4329960d7cd09101e99,
-/// `gen/rowcolumn-diacritics.txt`, SHA-256
-/// a80368b3272c41d8b50f3f640cf4305b6423e5a1aae6b72a405129bc29425f2c.
-/// Unicode data attribution is retained in LICENSES/UNICODE-DATA.txt.
 pub const diacritics = [coordinate_count]u21{
     0x0305,  0x030d,  0x030e,  0x0310,  0x0312,  0x033d,  0x033e,  0x033f,
     0x0346,  0x034a,  0x034b,  0x034c,  0x0350,  0x0351,  0x0352,  0x0357,

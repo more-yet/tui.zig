@@ -1,8 +1,11 @@
 const std = @import("std");
 
-/// Removes one entry from a power-of-two linear-probing index. Entry IDs are
-/// encoded as `entry_index + 1`; zero is the empty sentinel. Only slot IDs move,
-/// so IDs retained by framebuffer cells remain stable.
+pub fn requiredSlots(capacity: usize) usize {
+    var result: usize = 2;
+    while (result < capacity * 2) result *= 2;
+    return result;
+}
+
 pub fn remove(slots: []u32, entries: anytype, removed_slot: usize) void {
     std.debug.assert(slots.len >= 2 and std.math.isPowerOfTwo(slots.len));
     std.debug.assert(slots[removed_slot] != 0);

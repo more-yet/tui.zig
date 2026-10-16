@@ -1,5 +1,3 @@
-//! Fresh processes keep fork, signal dispositions, and syscall fault injection
-//! independent of the Zig test runner's threads and other contract tests.
 const std = @import("std");
 const tui = @import("tui");
 const linux = std.os.linux;
@@ -27,7 +25,6 @@ pub fn main(init: std.process.Init) !void {
     const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(null_fd) != .SUCCESS) return error.OpenFailed;
     defer _ = linux.close(@intCast(null_fd));
-    // An intentionally inheritable descriptor above stdio tests exec isolation.
     const marker = std.posix.system.fcntl(@intCast(null_fd), std.posix.F.DUPFD, @as(c_int, 100));
     if (marker != 100) return error.DescriptorFixtureFailed;
     defer _ = linux.close(marker);
@@ -89,8 +86,6 @@ fn deadline(io: std.Io) std.Io.Clock.Timestamp {
 }
 
 fn denyCloseRange(err: std.posix.E) !void {
-    // A narrow fault injector, inherited by the child. All other syscalls retain
-    // their normal behavior, including those needed for reporting and cleanup.
     const Instruction = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 };
     const Program = extern struct { len: u16, filter: [*]const Instruction };
     const bpf = linux.BPF;

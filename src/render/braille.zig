@@ -13,7 +13,7 @@ pub const PixelPoint = struct {
     y: usize,
 };
 
-/// A 2-by-4 dot canvas per terminal cell over caller-owned mask storage.
+/// One terminal cell holds 2 × 4 dots. Keep mask storage alive for the canvas lifetime.
 pub const BrailleCanvas = struct {
     storage: []u8,
     width: u16,

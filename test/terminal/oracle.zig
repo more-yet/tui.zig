@@ -1,5 +1,3 @@
-//! Native terminal oracle with bounded replies and image storage. Keep this at
-//! a stable address: the stream borrows its terminal and callback context.
 const Oracle = @This();
 const std = @import("std");
 pub const vt = @import("ghostty-vt");
@@ -50,7 +48,6 @@ pub fn write(self: *Oracle, bytes: []const u8) !void {
     if (self.graphics_failure) return error.TerminalGraphicsFailure;
 }
 
-/// Borrowed until the next write. Copy before feeding more terminal output.
 pub fn takeReplies(self: *Oracle) []const u8 {
     const bytes = self.reply_bytes[0..self.reply_len];
     self.reply_len = 0;

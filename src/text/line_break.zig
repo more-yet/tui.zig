@@ -70,24 +70,20 @@ const State = struct {
         const right2 = ahead.second;
         const right3 = ahead.third;
 
-        // LB4-LB6: mandatory breaks.
         if (left.class == .bk) return .mandatory;
         if (left.class == .cr and right.class == .lf) return .prohibited;
         if (isHard(left.class)) return .mandatory;
         if (isHard(right.class)) return .prohibited;
 
-        // LB7-LB10: spaces, zero-width controls, and combining sequences.
         if (right.class == .sp or right.class == .zw) return .prohibited;
         if (self.last_non_space != null and self.last_non_space.?.class == .zw) return .allowed;
         if (left.raw == .zwj) return .prohibited;
         if (right.attached) return .prohibited;
 
-        // LB11-LB12a: word joiners and glue.
         if (left.class == .wj or right.class == .wj) return .prohibited;
         if (left.class == .gl) return .prohibited;
         if (right.class == .gl and !in(left.class, &.{ .sp, .ba, .hy, .hh })) return .prohibited;
 
-        // LB13-LB17: punctuation with space-sensitive context.
         if (in(right.class, &.{ .cl, .cp, .ex, .sy })) return .prohibited;
         if (self.last_non_space != null and self.last_non_space.?.class == .op) return .prohibited;
         if (self.last_non_space) |quote| {
@@ -106,10 +102,8 @@ const State = struct {
             if (previous_non_space.class == .b2 and right.class == .b2) return .prohibited;
         }
 
-        // LB18: spaces break unless an earlier rule prohibited the boundary.
         if (left.class == .sp) return .allowed;
 
-        // LB19-LB20a: quotation marks, contingent breaks, and initial hyphens.
         if (right.class == .qu and !right.initial_punctuation) return .prohibited;
         if (left.class == .qu and !left.final_punctuation) return .prohibited;
         if (!left.east_asian and right.class == .qu) return .prohibited;
@@ -120,14 +114,12 @@ const State = struct {
         if (in(left.class, &.{ .hy, .hh }) and in(right.class, &.{ .al, .hl }) and
             isWordInitialPredecessor(self.previous)) return .prohibited;
 
-        // LB21-LB22: hyphens, nonstarters, and inseparables.
         if (in(right.class, &.{ .ba, .hh, .hy, .ns }) or left.class == .bb) return .prohibited;
         if (in(left.class, &.{ .hy, .hh }) and right.class != .hl and
             self.previous != null and self.previous.?.class == .hl) return .prohibited;
         if (left.class == .sy and right.class == .hl) return .prohibited;
         if (right.class == .in) return .prohibited;
 
-        // LB23-LB25: alphanumeric and numeric expressions.
         if (in(left.class, &.{ .al, .hl }) and right.class == .nu) return .prohibited;
         if (left.class == .nu and in(right.class, &.{ .al, .hl })) return .prohibited;
         if (left.class == .pr and in(right.class, &.{ .id, .eb, .em })) return .prohibited;
@@ -146,14 +138,12 @@ const State = struct {
         }
         if (in(left.class, &.{ .hy, .is }) and right.class == .nu) return .prohibited;
 
-        // LB26-LB27: Hangul syllable blocks.
         if (left.class == .jl and in(right.class, &.{ .jl, .jv, .h2, .h3 })) return .prohibited;
         if (in(left.class, &.{ .jv, .h2 }) and in(right.class, &.{ .jv, .jt })) return .prohibited;
         if (in(left.class, &.{ .jt, .h3 }) and right.class == .jt) return .prohibited;
         if (isHangul(left.class) and right.class == .po) return .prohibited;
         if (left.class == .pr and isHangul(right.class)) return .prohibited;
 
-        // LB28-LB29: alphabetic and Brahmic orthographic syllables.
         if (in(left.class, &.{ .al, .hl }) and in(right.class, &.{ .al, .hl })) return .prohibited;
         if (left.class == .ap and isAksaraBase(right)) return .prohibited;
         if (isAksaraBase(left) and in(right.class, &.{ .vf, .vi })) return .prohibited;
@@ -164,7 +154,6 @@ const State = struct {
         }
         if (left.class == .is and in(right.class, &.{ .al, .hl })) return .prohibited;
 
-        // LB30-LB30b: parentheses, flags, and emoji modifiers.
         if (in(left.class, &.{ .al, .hl, .nu }) and right.class == .op and !right.east_asian) {
             return .prohibited;
         }
@@ -178,12 +167,10 @@ const State = struct {
             return .prohibited;
         }
 
-        // LB31: break everywhere else.
         return .allowed;
     }
 };
 
-/// Lazily yields Unicode 17 default line-break boundaries without allocation.
 pub const Iterator = struct {
     input: []const u8,
     offset: usize = 0,
@@ -245,7 +232,6 @@ pub const Iterator = struct {
     }
 };
 
-/// Stateful boundary classifier for segmented or styled input.
 pub const Machine = struct {
     state: State = .{},
 
@@ -253,7 +239,6 @@ pub const Machine = struct {
         self.state.consume(makeScalar(codepoint, 0, 0, self.state.left));
     }
 
-    /// Classifies the boundary before `right`; `second` and `third` are bounded lookahead.
     pub fn boundary(self: *const Machine, right: u21, second: ?u21, third: ?u21) Kind {
         if (self.state.left == null) return .prohibited;
         const first_scalar = makeScalar(right, 0, 0, self.state.left);

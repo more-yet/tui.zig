@@ -13,7 +13,6 @@ pub const Error = error{
     OverlappingStorage,
 };
 
-/// Bounded command history with separate caller-owned storage for the live draft.
 pub const InputHistory = struct {
     entries: []Entry,
     bytes: []u8,
@@ -23,8 +22,7 @@ pub const InputHistory = struct {
     navigation: ?usize = null,
     draft_len: usize = 0,
 
-    /// Caller-owned entry, byte, and draft storage must remain fixed and
-    /// pairwise disjoint for the history lifetime.
+    /// Keep entry, byte, and draft slices fixed, disjoint, and alive for this history.
     pub fn init(entries: []Entry, bytes: []u8, draft: []u8) Error!InputHistory {
         const entry_bytes = std.mem.sliceAsBytes(entries);
         if (memory.slicesOverlap(entry_bytes, bytes) or
@@ -43,14 +41,14 @@ pub const InputHistory = struct {
         return self.len;
     }
 
-    /// The returned slice remains borrowed until the next history mutation.
+    /// Copy before the next history mutation if retaining the slice.
     pub fn entry(self: *const InputHistory, index: usize) ?[]const u8 {
         if (index >= self.len) return null;
         const item = self.entries[index];
         return self.bytes[item.offset .. item.offset + item.len];
     }
 
-    /// Appends a non-empty entry. Consecutive duplicates are deliberately ignored.
+    /// Empty entries and consecutive duplicates are ignored.
     pub fn push(self: *InputHistory, value: []const u8) Error!bool {
         if (value.len == 0) {
             self.resetNavigation();
@@ -73,7 +71,7 @@ pub const InputHistory = struct {
         return true;
     }
 
-    /// Saves `current` as the draft on first use and returns the preceding entry.
+    /// Pass the current field text; first navigation saves it as the draft.
     pub fn previous(self: *InputHistory, current: []const u8) Error!?[]const u8 {
         if (self.len == 0) return null;
         if (self.navigation == null) {
@@ -87,7 +85,7 @@ pub const InputHistory = struct {
         return self.entry(self.navigation.?);
     }
 
-    /// Returns the following entry, then the saved draft after the newest entry.
+    /// Navigating past the newest entry restores the saved draft.
     pub fn next(self: *InputHistory) ?[]const u8 {
         const index = self.navigation orelse return null;
         if (index + 1 < self.len) {

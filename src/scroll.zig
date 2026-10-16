@@ -10,12 +10,10 @@ pub const Range = struct {
     }
 };
 
-/// Caller-owned row viewport with explicit tail-follow policy.
 pub const Viewport = struct {
     top: usize = 0,
     follow: bool = true,
 
-    /// Reconciles append, head eviction, data shrink, and viewport resize.
     pub fn update(self: *Viewport, total_rows: usize, visible_rows: u16, dropped_head_rows: usize) bool {
         const previous = self.*;
         if (total_rows == 0) {
@@ -115,7 +113,7 @@ pub const DecodeResult = struct {
     }
 };
 
-/// Bounded FIFO of complete renderable lines. Borrowed rows expire when their slot is overwritten.
+/// Copy borrowed rows before their ring slots are overwritten if retaining them.
 pub fn LineRing(comptime max_line_bytes_value: usize) type {
     return struct {
         pub const max_line_bytes = max_line_bytes_value;
@@ -151,19 +149,17 @@ pub fn LineRing(comptime max_line_bytes_value: usize) type {
         }
 
         pub fn append(self: *Self, line: []const u8) AppendError!AppendResult {
-            if (self.storage.len == 0) return error.NoCapacity;
             if (line.len > max_line_bytes) return error.LineTooLong;
             _ = text_line.measure(line, .narrow) catch return error.InvalidLine;
 
             return self.appendValid(line);
         }
 
-        inline fn appendValid(self: *Self, line: []const u8) AppendError!AppendResult {
+        inline fn appendValid(self: *Self, line: []const u8) error{NoCapacity}!AppendResult {
             if (self.storage.len == 0) return error.NoCapacity;
-            if (line.len > max_line_bytes) return error.LineTooLong;
             const full = self.line_count == self.storage.len;
             const index = if (full) self.head else self.indexOf(self.line_count);
-            copyLine(self.storage[index].bytes[0..line.len], line);
+            @memmove(self.storage[index].bytes[0..line.len], line);
             self.storage[index].len = line.len;
             if (full) {
                 self.head = nextIndex(self.head, self.storage.len);
@@ -179,7 +175,7 @@ pub fn LineRing(comptime max_line_bytes_value: usize) type {
             return slot.bytes[0..slot.len];
         }
 
-        /// Provider-compatible accessor. `index` must be less than `count()`.
+        /// Requires `index < count()`.
         pub fn row(self: *const Self, index: usize) []const u8 {
             return self.get(index) orelse unreachable;
         }
@@ -191,7 +187,6 @@ pub fn LineRing(comptime max_line_bytes_value: usize) type {
     };
 }
 
-/// Incrementally frames untrusted byte chunks into complete renderable lines.
 pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
     return struct {
         pub const max_line_bytes = max_line_bytes_value;
@@ -257,7 +252,7 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
                 if (line.len > max_line_bytes) {
                     result.overlong_rows += 1;
                 } else {
-                    self.appendComplete(ring, &result, line);
+                    appendComplete(ring, &result, line);
                 }
                 start = end + 1;
             }
@@ -272,8 +267,7 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
             return result;
         }
 
-        inline fn appendComplete(self: *Self, ring: *Ring, result: *DecodeResult, line: []const u8) void {
-            _ = self;
+        inline fn appendComplete(ring: *Ring, result: *DecodeResult, line: []const u8) void {
             std.debug.assert(line.len <= max_line_bytes);
             const appended = if (printableAscii(line))
                 ring.appendValid(line)
@@ -289,7 +283,7 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
             }
         }
 
-        /// Flushes one final unterminated line and reports any incomplete rejected row.
+        /// Call at EOF to flush the final unterminated line.
         pub fn finish(self: *Self, ring: *Ring) DecodeResult {
             var result: DecodeResult = .{};
             if (self.discarding) |reason| {
@@ -341,10 +335,6 @@ inline fn printableAscii(value: []const u8) bool {
 
 fn nextIndex(index: usize, capacity: usize) usize {
     return if (index + 1 == capacity) 0 else index + 1;
-}
-
-fn copyLine(destination: []u8, source: []const u8) void {
-    @memmove(destination, source);
 }
 
 fn maxTop(total_rows: usize, visible_rows: u16) usize {

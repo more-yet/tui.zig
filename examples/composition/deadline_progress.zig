@@ -61,8 +61,8 @@ pub const App = struct {
     }
 
     fn visibleCells(self: *const App) u16 {
-        if (self.size.width == 0) return 0;
-        return @intCast((@as(u128, self.elapsed_ns) * self.size.width) / self.duration_ns);
+        const gauge = tui.widget.Gauge{ .value = self.elapsed_ns, .total = self.duration_ns };
+        return gauge.filledWidth(self.size.width);
     }
 };
 
