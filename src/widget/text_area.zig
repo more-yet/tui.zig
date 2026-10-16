@@ -1,10 +1,8 @@
-//! Multiline presentation and input handling for a caller-owned editor model.
-
 const std = @import("std");
-const editor = @import("../editor.zig");
+const editor = @import("../editor/model.zig");
 const input = @import("../input.zig");
 const render = @import("../render.zig");
-const theme = @import("../theme.zig");
+const theme = @import("../ui/theme.zig");
 const Update = @import("update.zig").Update;
 
 pub const TextArea = struct {
@@ -13,10 +11,11 @@ pub const TextArea = struct {
     selection_role: theme.Role = .{
         .normal = .{ .attributes = .{ .reverse = true } },
     },
-    /// Disabled widget operations cancel staged paste. If no operation observes
-    /// a disable/re-enable transition, call `model.cancelPaste()` explicitly.
+    /// Call `model.cancelPaste()` if disable/re-enable happens between widget operations.
     enabled: bool = true,
     focused: bool = false,
+    /// Set false when the application uses the native terminal cursor.
+    paint_caret: bool = true,
     pending_failure: ?editor.EditError = null,
 
     pub fn handle(self: *TextArea, event: input.Event) Update {
@@ -46,6 +45,21 @@ pub const TextArea = struct {
         return self.model.setViewportSize(size.width, size.height);
     }
 
+    /// Call `layout(size)` first. Returns null when the caret should be hidden.
+    pub fn caretPosition(self: *const TextArea) ?render.Point {
+        if (!self.enabled) self.model.cancelPaste();
+        const caret = self.visibleCaret() orelse return null;
+        return .{ .x = caret.screen_column, .y = @intCast(caret.row - self.model.viewport.top_row) };
+    }
+
+    fn visibleCaret(self: *const TextArea) ?editor.CaretWindow {
+        if (!self.enabled or !self.focused) return null;
+        const viewport = self.model.viewport;
+        const caret = self.model.visibleCaretWindow(viewport.left_column, viewport.width) orelse return null;
+        if (caret.row < viewport.top_row or caret.row - viewport.top_row >= viewport.height) return null;
+        return caret;
+    }
+
     pub fn draw(self: *const TextArea, surface: *render.Surface) !void {
         if (!self.enabled) self.model.cancelPaste();
         const size = surface.size();
@@ -57,10 +71,7 @@ pub const TextArea = struct {
         const base_style = self.role.resolve(state);
         const selected_style = self.selection_role.resolve(state);
         const selection = self.model.selection();
-        const caret = if (self.enabled and self.focused)
-            self.model.visibleCaretWindow(self.model.viewport.left_column, size.width)
-        else
-            null;
+        const caret = if (self.paint_caret) self.visibleCaret() else null;
         const visible = self.model.visibleRows();
         var row_index = visible.start;
 

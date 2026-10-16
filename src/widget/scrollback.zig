@@ -1,16 +1,16 @@
-//! Read-only viewport over caller-owned line data.
-
+const std = @import("std");
 const input = @import("../input.zig");
 const render = @import("../render.zig");
 const scroll = @import("../scroll.zig");
 const text = @import("../text.zig");
-const theme = @import("../theme.zig");
+const theme = @import("../ui/theme.zig");
 const Update = @import("update.zig").Update;
 
 pub fn Scrollback(comptime Provider: type) type {
     return struct {
         provider: *Provider,
         viewport: *scroll.Viewport,
+        /// Input coordinates use this space; draw into a surface of exactly this size.
         bounds: render.Rect,
         role: theme.Role = .{},
         enabled: bool = true,
@@ -52,7 +52,8 @@ pub fn Scrollback(comptime Provider: type) type {
         }
 
         pub fn draw(self: *Self, surface: *render.Surface) !void {
-            const size = surface.size();
+            const size: render.Size = .{ .width = self.bounds.width, .height = self.bounds.height };
+            std.debug.assert(std.meta.eql(size, surface.size()));
             const count = self.provider.count();
             _ = self.viewport.update(count, size.height, 0);
             const visible = self.viewport.visibleRange(count, size.height);

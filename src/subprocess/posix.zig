@@ -110,15 +110,12 @@ pub const WriteResult = union(enum) {
 pub const PtyState = enum {
     empty,
     starting,
-    /// The process exclusively owns a direct child that has not been reaped.
-    /// This includes stopped children and exited children with uncollected status.
+    /// Still owns wait status, including stopped or exited-but-unreaped children.
     running,
     reaped,
 };
 
-/// Owns one direct child's wait status and PTY master. Exactly one component
-/// must call this value's status and cleanup methods; competing reapers,
-/// especially wildcard waits, can make the child's status unavailable.
+/// One owner must collect this child's status. Do not use competing or wildcard waits.
 pub const PtyProcess = struct {
     io: std.Io,
     lifecycle: PtyState = .empty,
@@ -130,9 +127,8 @@ pub const PtyProcess = struct {
         return .{ .io = io };
     }
 
-    /// Uses `fork`; call before starting worker threads or loading at-fork-sensitive libraries.
-    /// An interrupted or failed post-fork handshake can return while retaining
-    /// child ownership in `.running`; reconcile it with `killAndWait` before deinit.
+    /// Call before starting threads. Even on error, check `state()`;
+    /// a `.running` child needs `killAndWait()` before `deinit()`.
     pub fn spawnBeforeThreads(
         self: *PtyProcess,
         command: Command,
@@ -141,8 +137,6 @@ pub const PtyProcess = struct {
     ) !void {
         if (self.lifecycle != .empty) return error.AlreadySpawned;
         if (options.size.width == 0 or options.size.height == 0) return error.InvalidSize;
-        // Automatic reaping would release the PID while this value still owns
-        // it. Keep exact-child status available for signaling and cleanup.
         try validateChildWaitPolicy();
         const prepared = try storage.prepare(command.argv);
         self.lifecycle = .starting;
@@ -238,9 +232,7 @@ pub const PtyProcess = struct {
         return self.lifecycle == .reaped;
     }
 
-    /// Performs one nonblocking exact-pid status check. PTY EOF is independent
-    /// from child status. `AlreadyReaped` means no collectible status remains;
-    /// it does not fabricate a successful exit.
+    /// One nonblocking status check. PTY EOF does not mean the child was reaped.
     pub fn poll(self: *PtyProcess) !?WaitEvent {
         switch (self.lifecycle) {
             .empty => return error.NoChild,
@@ -251,10 +243,7 @@ pub const PtyProcess = struct {
         return self.waitOnce(std.posix.W.NOHANG | std.posix.W.UNTRACED | wait_continued);
     }
 
-    /// Blocks for the next exact-pid stop, continuation, or exit status. The
-    /// caller must arrange its own notification/deadline policy when blocking
-    /// here is unsuitable. PTY EOF does not imply that this call will complete,
-    /// and signal interruption is returned rather than restarted internally.
+    /// Blocks for child status, not PTY EOF. Use `poll()` when the UI must remain responsive.
     pub fn wait(self: *PtyProcess) !WaitEvent {
         switch (self.lifecycle) {
             .empty => return error.NoChild,
@@ -279,9 +268,8 @@ pub const PtyProcess = struct {
         try self.sendSignal(.KILL);
     }
 
-    /// Force-kills and reaps the exclusively owned child before an awake-clock
-    /// deadline. Waiting uses a temporary pidfd and never falls back to sleeps.
-    /// Timeout or interruption can leave a killed child for a later retry.
+    /// Kills and reaps by an absolute awake-clock deadline.
+    /// On timeout or interruption, retain ownership and retry cleanup before `deinit()`.
     pub fn killAndWait(self: *PtyProcess, deadline: std.Io.Clock.Timestamp) !void {
         if (deadline.clock != .awake) return error.WrongClock;
         const child_pid = self.child_pid orelse return error.NoChild;
@@ -330,7 +318,6 @@ pub const PtyProcess = struct {
         }
     }
 
-    /// Performs one read syscall. Interruption is returned to the caller.
     pub fn read(self: *PtyProcess, buffer: []u8) !ReadResult {
         if (buffer.len == 0) return error.EmptyBuffer;
         if (self.eof) return .eof;
@@ -350,7 +337,6 @@ pub const PtyProcess = struct {
         return .{ .data = buffer[0..count] };
     }
 
-    /// Performs one write syscall. Interruption is returned to the caller.
     pub fn write(self: *PtyProcess, bytes: []const u8) !WriteResult {
         if (bytes.len == 0) return .{ .written = 0 };
         const master = self.master orelse return .closed;
@@ -366,7 +352,6 @@ pub const PtyProcess = struct {
         };
     }
 
-    /// Performs one resize ioctl. Interruption is returned to the caller.
     pub fn setSize(self: *PtyProcess, size: render.Size) !void {
         if (size.width == 0 or size.height == 0) return error.InvalidSize;
         const master = self.master orelse return error.Closed;
@@ -379,23 +364,19 @@ pub const PtyProcess = struct {
         };
     }
 
-    /// Returns a borrowed nonblocking descriptor. It remains valid only until
-    /// `closeMaster` or `deinit` and must not be closed by the borrower.
+    /// Borrowed until `closeMaster()` or `deinit()`; do not close it yourself.
     pub fn borrowedMaster(self: *const PtyProcess) !std.Io.File {
         return self.master orelse error.Closed;
     }
 
-    /// Releases the PTY descriptor without changing child wait ownership.
-    /// Closing the master neither terminates nor reaps the child.
+    /// Closes only the PTY; you must still collect child status.
     pub fn closeMaster(self: *PtyProcess) void {
         const master = self.master orelse return;
         master.close(self.io);
         self.master = null;
     }
 
-    /// Releases PTY resources only after child wait ownership is discharged.
-    /// A running or stopped child must first be reaped by `wait`, `poll`, or
-    /// bounded `killAndWait`; PTY EOF alone is insufficient.
+    /// Reap the child with `poll()`, `wait()`, or `killAndWait()` first.
     pub fn deinit(self: *PtyProcess) error{ChildNotReaped}!void {
         if (self.lifecycle == .starting or self.lifecycle == .running) return error.ChildNotReaped;
         self.closeMaster();
@@ -418,7 +399,7 @@ pub const PtyProcess = struct {
         }
         std.debug.assert(result == child_pid);
         const status: u32 = @bitCast(raw_status);
-        if (status == 0xffff) return .continued; // Linux WIFCONTINUED encoding.
+        if (status == 0xffff) return .continued;
         if (std.posix.W.IFEXITED(status)) {
             self.lifecycle = .reaped;
             return .{ .exit = .{ .exited = std.posix.W.EXITSTATUS(status) } };
@@ -561,8 +542,6 @@ fn closeInheritedDescriptors(error_fd: c_int) void {
     const result = std.os.linux.close_range(4, -1, .{ .UNSHARE = false, .CLOEXEC = false });
     const err = std.os.linux.errno(result);
     if (err != .SUCCESS) {
-        // Raw Linux syscalls return -errno; libc calls use -1 plus errno.
-        // Carry the kernel error into the common child-failure report.
         std.c._errno().* = @intFromEnum(err);
         childFail(error_fd, .close_descriptors);
     }

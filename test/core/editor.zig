@@ -4,6 +4,64 @@ const tui = @import("tui");
 const testing = std.testing;
 const prepended_emoji = "\u{0600}\u{1f600}";
 
+test "one-row single-line storage supports Unicode edits paste and history without enabling unsafe wrapping" {
+    var text: [16]u8 = undefined;
+    var boundaries: [17]tui.editor.Boundary = undefined;
+    var rows: [1]tui.editor.VisualRow = undefined;
+    var paste: [16]u8 = undefined;
+    var model = try tui.editor.Model.initSingleLine(.{
+        .text = &text,
+        .boundaries = &boundaries,
+        .visual_rows = &rows,
+        .paste = &paste,
+    }, "a\u{754c}");
+    var records: [4]tui.editor.HistoryRecord = undefined;
+    var history_bytes: [64]u8 = undefined;
+    var history = try tui.editor.History.init(&records, &history_bytes);
+    try model.setHistory(&history);
+    _ = model.setViewportSize(1, 1);
+    try expectSuccessfulRedraw(model.handle(.{ .text = "e\u{301}" }));
+    try testing.expectEqualStrings("a\u{754c}e\u{301}", model.value());
+    try testing.expectEqual(@as(usize, 1), model.visual_row_count);
+    try testing.expectEqual(@as(usize, 4), rows[0].width);
+    const viewport = model.viewport;
+    try testing.expectError(error.IndexCapacityExceeded, model.setSoftWrap(true));
+    try testing.expect(!model.softWrapEnabled());
+    try testing.expectEqual(viewport, model.viewport);
+    try testing.expectEqual(error.InvalidText, model.handle(.{ .text = "\n" }).failure.?);
+
+    _ = model.handle(.paste_start);
+    _ = model.handle(.{ .paste_chunk = "!" });
+    try expectSuccessfulRedraw(model.handle(.paste_end));
+    try testing.expect(try model.undo());
+    try testing.expectEqualStrings("a\u{754c}e\u{301}", model.value());
+    try testing.expect(try model.redo());
+    try testing.expectEqualStrings("a\u{754c}e\u{301}!", model.value());
+    try testing.expectEqual(@as(usize, 5), rows[0].width);
+    _ = model.selectAll();
+    try testing.expect(try model.replaceSelection("1234567890123456"));
+    try testing.expectEqual(error.CapacityExceeded, model.handle(.{ .text = "x" }).failure.?);
+    try testing.expectEqualStrings("1234567890123456", model.value());
+
+    _ = model.selectAll();
+    try testing.expect(try model.replaceSelection(""));
+    try testing.expect(try model.setSoftWrap(true));
+    try testing.expectEqual(error.CapacityExceeded, model.handle(.{ .text = "a" }).failure.?);
+    try testing.expectEqualStrings("", model.value());
+    try testing.expect(try model.setSoftWrap(false));
+    try expectSuccessfulRedraw(model.handle(.{ .text = "a" }));
+
+    var full: tui.editor.FixedStorage(8) = .{};
+    var wrapped = try tui.editor.Model.initSingleLine(full.slices(), "abcd");
+    _ = wrapped.setViewportSize(2, 1);
+    try testing.expect(try wrapped.setSoftWrap(true));
+    try testing.expectEqual(@as(usize, 2), wrapped.visual_row_count);
+    _ = wrapped.setViewportSize(1, 1);
+    try testing.expectEqual(@as(usize, 4), wrapped.visual_row_count);
+    try testing.expect(try wrapped.setSoftWrap(false));
+    try testing.expectEqual(@as(usize, 1), wrapped.visual_row_count);
+}
+
 fn expectSuccessfulRedraw(result: tui.editor.EventResult) !void {
     try testing.expectEqual(tui.editor.EventStatus.redraw, result.status);
     try testing.expect(result.failure == null);

@@ -1,4 +1,3 @@
-const std = @import("std");
 const grapheme = @import("grapheme.zig");
 
 pub const Alignment = enum {
@@ -24,7 +23,7 @@ pub const Layout = struct {
     ellipsis: bool,
 };
 
-pub const Error = grapheme.WidthError || error{ GraphemeTooLong, ZeroWidthGrapheme, WidthOverflow };
+pub const Error = grapheme.WidthError || error{ GraphemeTooLong, ZeroWidthGrapheme };
 
 pub const ellipsis = "\xE2\x80\xA6";
 
@@ -123,7 +122,7 @@ fn analyze(
         if (cluster.bytes.len > grapheme.max_cluster_bytes) return error.GraphemeTooLong;
         const width = try cluster.displayWidthAssumeValid(width_profile);
         if (width == 0) return error.ZeroWidthGrapheme;
-        result.total_width = std.math.add(usize, result.total_width, width) catch return error.WidthOverflow;
+        result.total_width += width;
         const byte_end = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(text.ptr) + cluster.bytes.len;
         if (result.total_width <= clip_limit) {
             result.clipped_end = byte_end;

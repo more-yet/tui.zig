@@ -4,7 +4,6 @@ const text_input = @import("widget/text_input.zig");
 const text_area = @import("widget/text_area.zig");
 const scrollback = @import("widget/scrollback.zig");
 const data = @import("widget/data.zig");
-const navigation = @import("widget/navigation.zig");
 const scrollbar = @import("widget/scrollbar.zig");
 
 pub const Update = @import("widget/update.zig").Update;
@@ -20,8 +19,7 @@ pub const TextArea = text_area.TextArea;
 pub const Scrollback = scrollback.Scrollback;
 pub const ScrollState = data.ScrollState;
 pub const Column = data.Column;
+pub const ColumnLayout = data.ColumnLayout;
 pub const List = data.List;
 pub const Table = data.Table;
-pub const MenuState = navigation.MenuState;
-pub const Menu = navigation.Menu;
 pub const Scrollbar = scrollbar.Scrollbar;

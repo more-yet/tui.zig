@@ -6,6 +6,7 @@ pub const Cursor = @import("render/cursor.zig").Cursor;
 pub const CursorShape = @import("render/cursor.zig").Shape;
 pub const Renderer = @import("render/renderer.zig").Renderer;
 pub const RendererStorage = @import("render/renderer.zig").Storage;
+pub const RendererStorageRequirements = @import("render/renderer.zig").StorageRequirements;
 pub const FixedRendererStorage = @import("render/renderer.zig").FixedStorage;
 pub const Surface = @import("render/renderer.zig").Surface;
 pub const FrameStats = @import("render/renderer.zig").FrameStats;

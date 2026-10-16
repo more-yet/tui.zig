@@ -15,18 +15,6 @@ pub fn build(b: *std.Build) void {
     });
     tui.linkSystemLibrary("util", .{});
 
-    const demo_module = b.createModule(.{
-        .root_source_file = b.path("examples/demo.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    demo_module.addImport("tui", tui);
-    const demo = b.addExecutable(.{
-        .name = "tui-demo",
-        .root_module = demo_module,
-    });
-    b.installArtifact(demo);
-
     const compositions_module = b.createModule(.{
         .root_source_file = b.path("examples/compositions.zig"),
         .target = target,
@@ -37,7 +25,6 @@ pub fn build(b: *std.Build) void {
         .name = "tui-compositions",
         .root_module = compositions_module,
     });
-    b.installArtifact(compositions);
 
     const unicode_generator_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode.zig"),
@@ -61,12 +48,11 @@ pub fn build(b: *std.Build) void {
     unicode_check.dependOn(&unicode_check_run.step);
 
     const unit_test_module = b.createModule(.{
-        .root_source_file = b.path("test/contracts.zig"),
+        .root_source_file = b.path("test/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     unit_test_module.addImport("tui", tui);
-    unit_test_module.addImport("demo_app", demo_module);
     const unit_tests = b.addTest(.{
         .root_module = unit_test_module,
     });
@@ -94,8 +80,23 @@ pub fn build(b: *std.Build) void {
         system_test_step.dependOn(&run.step);
     }
 
+    const runtime_tests = b.addExecutable(.{ .name = "tui-runtime-tests", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/system/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "tui", .module = tui }},
+    }) });
+    for ([_][]const u8{ "interrupt", "terminate", "suspend_resume" }) |scenario| {
+        const run = b.addRunArtifact(runtime_tests);
+        run.step.name = b.fmt("runtime {s}", .{scenario});
+        run.addArg(scenario);
+        run.expectExitCode(0);
+        run.has_side_effects = true;
+        system_test_step.dependOn(&run.step);
+    }
+
     const terminal_test_step = b.step("test-terminal", "Run opt-in headless terminal tests (requires -Dterminal-tests=true)");
-    if (b.option(bool, "terminal-tests", "Enable pinned libghostty-vt and private-PTY integration tests") orelse false) {
+    if (b.option(bool, "terminal-tests", "Enable pinned libghostty-vt output and restoration tests") orelse false) {
         test_step.dependOn(terminal_test_step);
         if (b.lazyDependency("ghostty", .{
             .target = target,
@@ -103,7 +104,7 @@ pub fn build(b: *std.Build) void {
             .@"emit-lib-vt" = true,
             .@"app-runtime" = .none,
             .simd = false,
-            .@"vt-features" = "-all,+render-state,+formatter,+kitty-graphics",
+            .@"vt-features" = "-all,+formatter,+kitty-graphics",
         })) |ghostty| {
             const imports = [_]std.Build.Module.Import{
                 .{ .name = "tui", .module = tui },
@@ -116,56 +117,13 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &imports,
             }) });
-            terminal_tests.root_module.addImport("demo_app", demo_module);
             terminal_test_step.dependOn(&b.addRunArtifact(terminal_tests).step);
-
-            const fixture = b.addExecutable(.{
-                .name = "tui-pty-fixture",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("test/terminal/fixture.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                    .link_libc = true,
-                }),
-            });
-            const pty_tests = b.addExecutable(.{
-                .name = "tui-pty-tests",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("test/terminal/pty.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                    .imports = &imports,
-                }),
-            });
-            // Each scenario forks before initializing its oracle or doing I/O
-            // that could start worker threads, and owns a private controlling PTY.
-            for ([_][]const u8{
-                "edit_resize",       "escape",                 "interrupt",               "terminate",
-                "suspend_resume",    "oversize",               "silent",                  "forced_cleanup",
-                "graphics_direct",   "graphics_file",          "graphics_temporary_file", "graphics_shared_memory",
-                "graphics_oversize", "graphics_reply_timeout", "graphics_write_failure",
-            }) |scenario| {
-                const run = b.addRunArtifact(pty_tests);
-                run.step.name = b.fmt("PTY {s}", .{scenario});
-                run.addArtifactArg(fixture);
-                run.addArtifactArg(demo);
-                run.addArg(scenario);
-                run.expectExitCode(0);
-                run.has_side_effects = true;
-                terminal_test_step.dependOn(&run.step);
-            }
         }
     } else {
         terminal_test_step.dependOn(&b.addFail("Enable the test-only dependency with: zig build test-terminal -Dterminal-tests=true").step);
     }
 
-    const demo_run = b.addRunArtifact(demo);
-    if (b.args) |args| demo_run.addArgs(args);
-    const demo_step = b.step("demo", "Run the interactive tui.zig portfolio");
-    demo_step.dependOn(&demo_run.step);
-
     const example_step = b.step("example", "Compile examples");
-    example_step.dependOn(&demo.step);
     example_step.dependOn(&compositions.step);
 
     const compositions_run = b.addRunArtifact(compositions);
@@ -185,13 +143,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
     });
     benchmark_module.addImport("tui", benchmark_tui);
-    const benchmark_demo = b.createModule(.{
-        .root_source_file = b.path("examples/demo.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseFast,
-    });
-    benchmark_demo.addImport("tui", benchmark_tui);
-    benchmark_module.addImport("demo_app", benchmark_demo);
     const benchmark = b.addExecutable(.{
         .name = "tui-base-benchmark",
         .root_module = benchmark_module,

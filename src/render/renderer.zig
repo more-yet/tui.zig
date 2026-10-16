@@ -10,18 +10,52 @@ const cell_module = @import("cell.zig");
 const cursor_module = @import("cursor.zig");
 const damage_module = @import("damage.zig");
 const glyph_store = @import("glyph_store.zig");
+const slot_index = @import("slot_index.zig");
 const style_module = @import("style.zig");
 const kitty_placeholder = @import("../graphics/placeholder.zig");
 
 pub const Storage = struct {
+    pub const DamageRow = damage_module.Row;
+    pub const GlyphEntry = glyph_store.Entry;
+    pub const StyleEntry = style_module.Entry;
+
     desired: []cell_module.Cell,
     presented: []cell_module.Cell,
-    damage_rows: []damage_module.Row,
+    damage_rows: []DamageRow,
     damage_bits: []usize,
-    glyph_entries: []glyph_store.Entry,
+    glyph_entries: []GlyphEntry,
     glyph_slots: []u32,
-    style_entries: []style_module.Entry,
+    style_entries: []StyleEntry,
     style_slots: []u32,
+};
+
+/// Element counts for allocation, e.g. `allocator.alloc(usize, counts.damage_bits)`.
+/// Size for maximum width and height, not just maximum cell count.
+pub const StorageRequirements = struct {
+    desired: usize,
+    presented: usize,
+    damage_rows: usize,
+    damage_bits: usize,
+    glyph_entries: usize,
+    glyph_slots: usize,
+    style_entries: usize,
+    style_slots: usize,
+
+    pub fn init(max_size: geometry.Size, grapheme_capacity: u32, style_capacity: u16) error{ InvalidSize, InvalidCapacity }!StorageRequirements {
+        if (max_size.width == 0 or max_size.height == 0) return error.InvalidSize;
+        if (grapheme_capacity == 0 or grapheme_capacity >= glyph_store.complex_tag or style_capacity == 0) return error.InvalidCapacity;
+        const cells = max_size.cellCount();
+        return .{
+            .desired = cells,
+            .presented = cells,
+            .damage_rows = max_size.height,
+            .damage_bits = damage_module.requiredTileWords(max_size),
+            .glyph_entries = grapheme_capacity,
+            .glyph_slots = slot_index.requiredSlots(grapheme_capacity),
+            .style_entries = style_capacity,
+            .style_slots = slot_index.requiredSlots(style_capacity),
+        };
+    }
 };
 
 pub fn FixedStorage(
@@ -30,17 +64,17 @@ pub fn FixedStorage(
     comptime grapheme_capacity: u32,
     comptime style_capacity: u16,
 ) type {
-    const max_size = geometry.Size{ .width = max_width, .height = max_height };
-    const cell_count = @as(usize, max_width) * max_height;
+    const required = StorageRequirements.init(.{ .width = max_width, .height = max_height }, grapheme_capacity, style_capacity) catch |err|
+        @compileError("invalid renderer storage: " ++ @errorName(err));
     return struct {
-        desired: [cell_count]cell_module.Cell = undefined,
-        presented: [cell_count]cell_module.Cell = undefined,
-        damage_rows: [max_height]damage_module.Row = undefined,
-        damage_bits: [damage_module.requiredTileWords(max_size)]usize = undefined,
-        glyph_entries: [grapheme_capacity]glyph_store.Entry = undefined,
-        glyph_slots: [glyph_store.requiredSlots(grapheme_capacity)]u32 = undefined,
-        style_entries: [style_capacity]style_module.Entry = undefined,
-        style_slots: [style_module.requiredSlots(style_capacity)]u32 = undefined,
+        desired: [required.desired]cell_module.Cell = undefined,
+        presented: [required.presented]cell_module.Cell = undefined,
+        damage_rows: [required.damage_rows]Storage.DamageRow = undefined,
+        damage_bits: [required.damage_bits]usize = undefined,
+        glyph_entries: [required.glyph_entries]Storage.GlyphEntry = undefined,
+        glyph_slots: [required.glyph_slots]u32 = undefined,
+        style_entries: [required.style_entries]Storage.StyleEntry = undefined,
+        style_slots: [required.style_slots]u32 = undefined,
 
         pub fn slices(self: *@This()) Storage {
             return .{
@@ -79,10 +113,8 @@ fn storageSlicesOverlap(storage: Storage) bool {
 pub const FrameStats = struct {
     bytes: usize = 0,
     work_units: u64 = 0,
-    // A u16-by-u16 terminal contains fewer than maxInt(u32) cells.
     cells_compared: u32 = 0,
     cells_changed: u32 = 0,
-    /// Number of bounded, same-style terminal runs emitted.
     runs: u32 = 0,
     dirty_rows: u16 = 0,
     full_repaint: bool = false,
@@ -91,8 +123,7 @@ pub const FrameStats = struct {
 pub const Presentation = union(enum) {
     output: []const u8,
     yielded: FrameStats,
-    /// A destructive clear was acknowledged. Replay application-owned
-    /// graphics before requesting the next text presentation step.
+    /// Replay owned graphics here, then call `invalidateOutputState()` before continuing.
     cleared: FrameStats,
     complete: FrameStats,
 };
@@ -179,8 +210,6 @@ pub const Renderer = struct {
     presentation_lookahead_changes: u2 = 0,
     presentation_damage_reset: damage_module.ResetProgress = .{},
     presentation_stats: FrameStats = .{},
-    // One bounded command: synchronized wrappers, cursor state, positioning, SGR,
-    // and a same-style run of complete graphemes fit within this fixed buffer.
     presentation_output: [512]u8 = undefined,
     pending_command: ?PendingCommand = null,
 
@@ -189,7 +218,7 @@ pub const Renderer = struct {
         dimensions: geometry.Size,
     ) !Renderer {
         if (dimensions.width == 0 or dimensions.height == 0) return error.InvalidSize;
-        const cell_count = try dimensions.cellCount();
+        const cell_count = dimensions.cellCount();
         if (storage.desired.len < cell_count or storage.presented.len < cell_count) {
             return error.BufferTooSmall;
         }
@@ -221,12 +250,10 @@ pub const Renderer = struct {
         return self.terminal_size;
     }
 
-    /// True after presentation begins until it completes or is aborted.
     pub fn isPresenting(self: *const Renderer) bool {
         return self.presentation_phase != .inactive;
     }
 
-    /// True when presentation work remains for these terminal capabilities.
     pub fn needsPresentation(self: *const Renderer, capabilities: capabilities_module.Capabilities) bool {
         return self.isPresenting() or self.frame_pending or
             self.shadow_valid and self.terminal_state.color_depth != capabilities.color_depth;
@@ -236,10 +263,10 @@ pub const Renderer = struct {
         try self.requireInactive();
         if (new_size.width == 0 or new_size.height == 0) return error.InvalidSize;
         if (new_size.width == self.terminal_size.width and new_size.height == self.terminal_size.height) return;
-        const new_cell_count = try new_size.cellCount();
+        const new_cell_count = new_size.cellCount();
         if (new_cell_count > self.desired.len or new_cell_count > self.presented.len) return error.SizeLimitExceeded;
         if (!self.damage.canResize(new_size)) return error.SizeLimitExceeded;
-        const old_cell_count = self.terminal_size.cellCount() catch unreachable;
+        const old_cell_count = self.terminal_size.cellCount();
         self.last_uniform_fill = null;
         self.resetDenseGrid(self.desired, old_cell_count, new_cell_count);
         self.resetDenseGrid(self.presented, old_cell_count, new_cell_count);
@@ -257,8 +284,7 @@ pub const Renderer = struct {
         self.frame_pending = true;
     }
 
-    /// Discards the terminal shadow while retaining the desired frame.
-    /// Use this after external output or terminal resume. The next presentation clears and repaints the terminal.
+    /// Call after terminal resume or unknown external output; next presentation clears and repaints.
     pub fn invalidateTerminal(self: *Renderer) !void {
         try self.requireInactive();
         self.invalidateTerminalState();
@@ -271,8 +297,8 @@ pub const Renderer = struct {
         self.terminal_cursor_state.invalidate();
     }
 
-    /// Starts cursor management and schedules any changed position, visibility, or shape.
-    /// An out-of-bounds position is retained but hidden until a later resize makes it visible.
+    /// Example: `try renderer.setCursor(.{ .position = .{ .x = 0, .y = 0 } });`
+    /// Out-of-bounds positions stay hidden until they fit after resize.
     pub fn setCursor(self: *Renderer, cursor: cursor_module.Cursor) !void {
         try self.requireInactive();
         if (self.desired_cursor) |current| {
@@ -309,8 +335,7 @@ pub const Renderer = struct {
         if (changed) self.damage.mark(rect);
     }
 
-    /// Returns a clipped drawing view borrowing this renderer. Recreate surfaces
-    /// after resize; drawing methods reject an active presentation.
+    /// Recreate borrowed surfaces after resize. Finish presentation before drawing.
     pub fn surface(self: *Renderer, rect: geometry.Rect) Surface {
         return Surface.init(
             self,
@@ -342,8 +367,8 @@ pub const Renderer = struct {
         };
     }
 
-    /// Generates bounded presentation work without performing I/O. The caller writes the
-    /// returned bytes and acknowledges exactly the accepted prefix with `consumePresentation`.
+    /// Call once per work turn, e.g. `try renderer.presentStep(256)`.
+    /// Write `.output` bytes and acknowledge only the accepted prefix; no I/O occurs here.
     pub fn presentStep(self: *Renderer, work_budget: u32) !Presentation {
         if (work_budget < 2) return error.InvalidWorkBudget;
         if (self.pending_command) |pending| return .{
@@ -442,7 +467,7 @@ pub const Renderer = struct {
         };
     }
 
-    /// Acknowledges bytes accepted by the caller's nonblocking output operation.
+    /// Pass the actual write count, not the offered buffer length.
     pub fn consumePresentation(self: *Renderer, count: usize) !void {
         if (self.pending_command == null) return error.NoPresentationOutput;
         const pending = &self.pending_command.?;
@@ -473,7 +498,7 @@ pub const Renderer = struct {
         }
     }
 
-    /// Aborts at a command boundary. A partially accepted command must be drained first.
+    /// Drain any partially written command before aborting.
     pub fn abortPresentation(self: *Renderer) !void {
         if (self.presentation_phase == .inactive) return;
         if (self.pending_command) |pending| if (pending.accepted != 0) return error.PartialOutputPending;
@@ -487,8 +512,7 @@ pub const Renderer = struct {
         self.terminal_cursor_state.invalidate();
     }
 
-    /// Invalidates cached cursor and SGR state after caller-owned graphics
-    /// output. This never clears the terminal or changes text damage.
+    /// Call after external graphics output; preserves text damage and does not clear.
     pub fn invalidateOutputState(self: *Renderer) !void {
         if (self.pending_command != null) return error.PresentationOutputPending;
         self.terminal_state.invalidate();
@@ -496,8 +520,7 @@ pub const Renderer = struct {
         if (self.desired_cursor != null) self.frame_pending = true;
     }
 
-    /// Starts one explicit presentation lifetime and captures terminal
-    /// capabilities. If no work is pending the renderer remains idle.
+    /// Captures capabilities for this frame. Call before driving `presentStep()`.
     pub fn beginPresentation(self: *Renderer, capabilities: capabilities_module.Capabilities) !void {
         if (self.presentation_phase != .inactive) return error.PresentationActive;
         if (self.shadow_valid and self.terminal_state.color_depth != capabilities.color_depth) {
@@ -1100,7 +1123,6 @@ pub const Renderer = struct {
         const previous = self.desired[index_value];
         if (previous.eql(next)) return false;
         self.noteDesiredMutation();
-        // Acquire before release so an intern slot cannot be reused in between.
         if (next.glyph != previous.glyph) {
             if (glyph_store.isComplex(next.glyph)) self.glyphs.retain(next.glyph);
             if (glyph_store.isComplex(previous.glyph)) self.glyphs.release(previous.glyph);
@@ -1113,8 +1135,6 @@ pub const Renderer = struct {
         return true;
     }
 
-    /// Replaces a repeated fill target in one pass. The caller's interned target
-    /// style remains pinned until batched cell references are accounted for.
     fn replaceDesiredFill(
         self: *Renderer,
         index_value: usize,
@@ -1151,7 +1171,6 @@ pub const Renderer = struct {
         return .{ .start = first, .end = last_changed };
     }
 
-    /// Replaces printable ASCII cells with one pinned target style in one pass.
     fn replaceDesiredAscii(
         self: *Renderer,
         index_value: usize,
@@ -1186,9 +1205,6 @@ pub const Renderer = struct {
         return .{ .start = first, .end = last_changed };
     }
 
-    /// Clears the other half of any wide glyph cut by a replacement range.
-    /// The caller must perform the non-fallible replacement immediately after
-    /// this returns so a continuation is never exposed by a public return.
     fn prepareAsciiReplacement(self: *Renderer, index_value: usize, count: u16) void {
         if (count == 0) return;
         const row_width: usize = self.terminal_size.width;
@@ -1409,6 +1425,12 @@ pub const Surface = struct {
         return self.extent;
     }
 
+    /// Convert widget caret coordinates for `Renderer.setCursor`; null means clipped.
+    pub fn screenPoint(self: *const Surface, local: geometry.Point) ?geometry.Point {
+        const placement = self.place(local) orelse return null;
+        return placement.point;
+    }
+
     pub inline fn surface(self: *const Surface, rect: geometry.Rect) Surface {
         return Surface.init(
             self.renderer,
@@ -1455,11 +1477,8 @@ pub const Surface = struct {
         }
     }
 
-    /// Paints fully explicit Kitty Unicode placeholder cells for an existing
-    /// virtual placement. Clipping advances source coordinates rather than
-    /// changing which image fragment each visible cell identifies. As with
-    /// other drawing operations, intern-capacity failure can leave a partial
-    /// desired update; overwrite the region before retrying.
+    /// Upload an image and create its virtual placement before drawing placeholders.
+    /// On capacity failure, overwrite the affected region before retrying.
     pub fn putKittyImage(
         self: *Surface,
         rect: geometry.Rect,

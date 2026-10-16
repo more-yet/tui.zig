@@ -1,6 +1,5 @@
 const std = @import("std");
 const tui = @import("tui");
-const demo_app = @import("demo_app");
 
 const batch_count = 9;
 const default_iterations = 250_000;
@@ -8,7 +7,6 @@ const terminal_size = tui.render.Size{ .width = 120, .height = 40 };
 const capabilities = tui.terminal.Capabilities{
     .color_depth = .truecolor,
     .synchronized_output = true,
-    .background_color_erase = true,
 };
 const text_area_initial =
     "00 bounded multiline editor\n" ++
@@ -53,7 +51,7 @@ const Scenario = enum {
     wrapped_styled_unicode,
     layout_split,
     layout_grid,
-    focus_route,
+    focus_navigation,
     command_match,
     owned_event_key,
     owned_event_paste,
@@ -72,7 +70,6 @@ const Scenario = enum {
     editor_history,
     line_break_scan,
     word_break_scan,
-    app_cycle,
     theme_resolve,
     display_panel,
     display_gauge,
@@ -85,7 +82,6 @@ const Scenario = enum {
     text_area_soft_wrap,
     text_area_deep_soft_wrap,
     text_area_deep_unwrapped,
-    demo_cycle,
     scrollback_view,
     list_view,
     table_view,
@@ -143,7 +139,6 @@ const RenderMeasurement = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    // Compile-time dispatch specializes every benchmark scenario.
     @setEvalBranchQuota(8_000);
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 3) return error.InvalidArguments;
@@ -166,31 +161,29 @@ pub fn main(init: std.process.Init) !void {
     var file_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &file_writer.interface;
 
-    inline for (std.meta.tags(Scenario)) |scenario| {
+    inline for (comptime std.meta.tags(Scenario)) |scenario| {
         if (selected == null or selected.? == scenario) switch (scenario) {
-            inline else => |active| switch (active) {
-                .command_match => try runCommandScenario(init, stdout, iterations),
-                .owned_event_key, .owned_event_paste => try runOwnedEventScenario(init, stdout, active, iterations),
-                .runtime_timer_heap => try runRuntimeTimerScenario(init, stdout, iterations),
-                .runtime_wakeup => try runRuntimeWakeScenario(init, stdout, iterations),
-                .runtime_signal => try runRuntimeSignalScenario(init, stdout, iterations),
-                .runtime_source_ready => try runRuntimeSourceScenario(init, stdout, iterations),
-                .pty_spawn => try runPtySpawnScenario(init, stdout, iterations),
-                .capability_negotiation => try runCapabilityScenario(init, stdout, iterations),
-                .scrollback_append => try runScrollbackScenario(init, stdout, iterations),
-                .line_decode => try runLineDecodeScenario(init, stdout, iterations),
-                .process_output_batch => try runProcessOutputBatchScenario(init, stdout, iterations),
-                .editor_middle_edit => try runEditorScenario(init, stdout, iterations),
-                .editor_deep_line => try runDeepLineScenario(init, stdout, iterations),
-                .editor_unicode_navigation => try runUnicodeNavigationScenario(init, stdout, iterations),
-                .editor_history => try runHistoryScenario(init, stdout, iterations),
-                .line_break_scan => try runLineBreakScenario(init, stdout, iterations),
-                .word_break_scan => try runWordBreakScenario(init, stdout, iterations),
-                .nonblocking_pipe => try runNonblockingPipeScenario(init, stdout, iterations),
-                .resize_large => try runLargeResizeScenario(init, stdout, iterations),
-                .graphics_transfer => try runGraphicsTransferScenario(init, stdout, iterations),
-                else => try runScenario(init, stdout, active, iterations),
-            },
+            .command_match => try runCommandScenario(init, stdout, iterations),
+            .owned_event_key, .owned_event_paste => try runOwnedEventScenario(init, stdout, scenario, iterations),
+            .runtime_timer_heap => try runRuntimeTimerScenario(init, stdout, iterations),
+            .runtime_wakeup => try runRuntimeWakeScenario(init, stdout, iterations),
+            .runtime_signal => try runRuntimeSignalScenario(init, stdout, iterations),
+            .runtime_source_ready => try runRuntimeSourceScenario(init, stdout, iterations),
+            .pty_spawn => try runPtySpawnScenario(init, stdout, iterations),
+            .capability_negotiation => try runCapabilityScenario(init, stdout, iterations),
+            .scrollback_append => try runScrollbackScenario(init, stdout, iterations),
+            .line_decode => try runLineDecodeScenario(init, stdout, iterations),
+            .process_output_batch => try runProcessOutputBatchScenario(init, stdout, iterations),
+            .editor_middle_edit => try runEditorScenario(init, stdout, iterations),
+            .editor_deep_line => try runDeepLineScenario(init, stdout, iterations),
+            .editor_unicode_navigation => try runUnicodeNavigationScenario(init, stdout, iterations),
+            .editor_history => try runHistoryScenario(init, stdout, iterations),
+            .line_break_scan => try runLineBreakScenario(init, stdout, iterations),
+            .word_break_scan => try runWordBreakScenario(init, stdout, iterations),
+            .nonblocking_pipe => try runNonblockingPipeScenario(init, stdout, iterations),
+            .resize_large => try runLargeResizeScenario(init, stdout, iterations),
+            .graphics_transfer => try runGraphicsTransferScenario(init, stdout, iterations),
+            else => try runScenario(init, stdout, scenario, iterations),
         };
     }
     try stdout.flush();
@@ -1183,8 +1176,6 @@ fn runScenario(
         }
         _ = try presentBuffered(&renderer, &output.writer, capabilities, null);
     }
-    var driver: tui.app.Driver = .{};
-    var application: BenchmarkApplication = .{};
     var form_state: BenchmarkFormState = .{};
     var text_input_storage: tui.editor.FixedStorage(128) = .{};
     var text_input_model = try tui.editor.Model.initSingleLine(text_input_storage.slices(), "alpha ox");
@@ -1203,7 +1194,7 @@ fn runScenario(
     }
     if (scenario == .text_input_selection) _ = try text_input_model.setSelection(6, 8);
     if (scenario == .text_area_soft_wrap or scenario == .text_area_deep_soft_wrap) {
-        _ = text_area_model.setSoftWrap(true);
+        _ = try text_area_model.setSoftWrap(true);
         _ = text_area.layout(.{ .width = if (scenario == .text_area_deep_soft_wrap) 8 else 24, .height = 20 });
         if (scenario == .text_area_soft_wrap) {
             _ = try text_area_model.setCursor(0);
@@ -1222,12 +1213,6 @@ fn runScenario(
         _ = try text_area_model.setCursor(deep_unwrapped_initial.len);
         _ = try text_area_model.setSelection(deep_unwrapped_initial.len - 8, deep_unwrapped_initial.len);
     }
-    var portfolio_input_storage: tui.editor.FixedStorage(256) = .{};
-    var portfolio_input_model = try tui.editor.Model.initSingleLine(portfolio_input_storage.slices(), "Ada");
-    var portfolio_editor_storage: tui.editor.FixedStorage(1024) = .{};
-    var portfolio_editor = try tui.editor.Model.init(portfolio_editor_storage.slices(), "Bounded portfolio editor");
-    var portfolio = demo_app.DemoApp.init(&portfolio_input_model, &portfolio_editor);
-    if (scenario == .demo_cycle) try portfolio.layout(.{ .width = 80, .height = 24 });
     var data_state: BenchmarkDataState = .{};
 
     const warmup_iterations = @min(iterations, 1_000);
@@ -1237,12 +1222,9 @@ fn runScenario(
             scenario,
             &renderer,
             &output.writer,
-            &driver,
-            &application,
             &form_state,
             &text_input,
             &text_area,
-            &portfolio,
             &data_state,
             iteration,
             init.io,
@@ -1266,12 +1248,9 @@ fn runScenario(
                 scenario,
                 &renderer,
                 &output.writer,
-                &driver,
-                &application,
                 &form_state,
                 &text_input,
                 &text_area,
-                &portfolio,
                 &data_state,
                 warmup_iterations + batch * iterations + iteration,
                 init.io,
@@ -1324,30 +1303,15 @@ fn renderIteration(
     comptime scenario: Scenario,
     renderer: *tui.render.Renderer,
     writer: *std.Io.Writer,
-    driver: *tui.app.Driver,
-    application: *BenchmarkApplication,
     form_state: *BenchmarkFormState,
     text_input: *tui.widget.TextInput,
     text_area: *tui.widget.TextArea,
-    portfolio: *demo_app.DemoApp,
     data_state: *BenchmarkDataState,
     iteration: usize,
     io: std.Io,
 ) !RenderMeasurement {
     switch (scenario) {
         .command_match => unreachable,
-        .app_cycle => {
-            const update = driver.dispatch(application, .{ .key = .{ .code = .enter } });
-            if (update != .redraw) unreachable;
-            try driver.prepare(renderer, application);
-            if (!renderer.needsPresentation(capabilities)) return .{ .stats = .{} };
-            return presentBuffered(
-                renderer,
-                writer,
-                capabilities,
-                if (scenario == .intern_churn) io else null,
-            );
-        },
         .theme_resolve => {
             const role = tui.theme.Role{
                 .normal = .{ .foreground = .{ .indexed = 7 } },
@@ -1464,15 +1428,6 @@ fn renderIteration(
             var surface = renderer.surface(.{ .x = 4, .y = 4, .width = 24, .height = 1 });
             try text_area.draw(&surface);
         },
-        .demo_cycle => {
-            const update = portfolio.handle(.{ .key = .{
-                .code = if (iteration & 1 == 0) .right else .left,
-                .modifiers = .{ .alt = true },
-            } });
-            if (update != .redraw) unreachable;
-            var surface = renderer.surface(.{ .x = 0, .y = 0, .width = 80, .height = 24 });
-            try portfolio.draw(&surface);
-        },
         .scrollback_view => {
             var scrollback = tui.widget.Scrollback(BenchmarkListProvider){
                 .provider = &data_state.list_provider,
@@ -1525,15 +1480,16 @@ fn renderIteration(
             try overlays.push(entry);
             if (overlays.hit(.{ .x = 0, .y = 0 }) != .modal_backdrop) unreachable;
 
-            data_state.menu.scroll.selected = iteration % (benchmark_menu_labels.len - 1);
-            var menu = tui.widget.Menu{
-                .labels = &benchmark_menu_labels,
-                .state = &data_state.menu,
+            data_state.overlay_scroll.selected = iteration % (benchmark_overlay_labels.len - 1);
+            var provider: BenchmarkOverlayProvider = .{};
+            var list = tui.widget.List(BenchmarkOverlayProvider){
+                .provider = &provider,
+                .state = &data_state.overlay_scroll,
                 .bounds = .{ .x = 37, .y = 13, .width = 46, .height = 10 },
                 .focused = true,
                 .selected_role = .{ .focused = .{ .attributes = .{ .reverse = true } } },
             };
-            if (menu.handle(.{ .key = .{ .code = .down } }) != .redraw) unreachable;
+            if (list.handle(.{ .key = .{ .code = .down } }) != .redraw) unreachable;
 
             var root = renderer.surface(tui.render.Rect.fromSize(renderer.size()));
             _ = try root.putText(.{ .x = 0, .y = 0 }, if (iteration & 1 == 0) "a" else "b", .{}, .narrow);
@@ -1542,8 +1498,8 @@ fn renderIteration(
                 var panel_surface = renderer.surface(overlay_entry.bounds);
                 const panel = tui.widget.Panel{ .title = "command palette" };
                 try panel.draw(&panel_surface);
-                var menu_surface = renderer.surface(menu.bounds);
-                try menu.draw(&menu_surface);
+                var list_surface = renderer.surface(list.bounds);
+                try list.draw(&list_surface);
             }
             if (overlays.pop() == null) unreachable;
         },
@@ -1769,45 +1725,14 @@ fn renderIteration(
             );
             std.mem.doNotOptimizeAway(&output);
         },
-        .focus_route => {
-            const Router = struct {
-                count: u16 = 0,
-
-                pub fn capture(self: *@This(), _: tui.focus.Id, _: tui.input.Event) tui.focus.RouteResult {
-                    self.count += 1;
-                    return .continueWith(.ignored);
-                }
-
-                pub fn target(self: *@This(), _: tui.focus.Id, _: tui.input.Event) tui.focus.RouteResult {
-                    self.count += 1;
-                    return .continueWith(.redraw);
-                }
-
-                pub fn bubble(self: *@This(), _: tui.focus.Id, _: tui.input.Event) tui.focus.RouteResult {
-                    self.count += 1;
-                    return .continueWith(.handled);
-                }
-            };
-
-            var storage: [8]tui.focus.Node = undefined;
+        .focus_navigation => {
+            var storage: [4]tui.focus.Target = undefined;
             var registry = try tui.focus.Registry.init(&storage);
+            try registry.add(.{ .id = 1, .rect = .{ .x = 1, .y = 1, .width = 4, .height = 1 } });
+            try registry.add(.{ .id = 2, .rect = .{ .x = 10, .y = 1, .width = 4, .height = 1 } });
+            try registry.add(.{ .id = 3, .rect = .{ .x = 1, .y = 5, .width = 4, .height = 1 } });
             try registry.add(.{
-                .id = 1,
-                .rect = .{ .x = 0, .y = 0, .width = 40, .height = 10 },
-                .focusable = false,
-            });
-            try registry.add(.{
-                .id = 2,
-                .parent = 1,
-                .rect = .{ .x = 0, .y = 0, .width = 30, .height = 8 },
-                .focusable = false,
-            });
-            try registry.add(.{ .id = 3, .parent = 2, .rect = .{ .x = 1, .y = 1, .width = 4, .height = 1 } });
-            try registry.add(.{ .id = 4, .parent = 2, .rect = .{ .x = 10, .y = 1, .width = 4, .height = 1 } });
-            try registry.add(.{ .id = 5, .parent = 2, .rect = .{ .x = 1, .y = 5, .width = 4, .height = 1 } });
-            try registry.add(.{
-                .id = 6,
-                .parent = 2,
+                .id = 4,
                 .rect = .{ .x = 10, .y = 5, .width = 4, .height = 1 },
                 .enabled = false,
             });
@@ -1815,13 +1740,10 @@ fn renderIteration(
             var manager: tui.focus.Manager = .{};
             _ = manager.move(&registry, .next);
             const target = manager.move(&registry, .right).?;
-            var path_storage: [4]tui.focus.Id = undefined;
-            const path = try registry.path(target, &path_storage);
-            var router: Router = .{};
-            const result = tui.focus.route(&router, path, .focus_in);
+            const hit = registry.hit(.{ .x = 10, .y = 1 });
             std.mem.doNotOptimizeAway(&manager);
-            std.mem.doNotOptimizeAway(&router);
-            std.mem.doNotOptimizeAway(&result);
+            std.mem.doNotOptimizeAway(target);
+            std.mem.doNotOptimizeAway(hit);
         },
         .owned_event_key,
         .owned_event_paste,
@@ -1991,26 +1913,6 @@ fn presentBuffered(
     }
 }
 
-const BenchmarkApplication = struct {
-    alternate: bool = false,
-
-    pub inline fn handle(self: *@This(), _: tui.input.Event) tui.widget.Update {
-        self.alternate = !self.alternate;
-        return .redraw;
-    }
-
-    pub inline fn layout(_: *@This(), _: tui.render.Size) !void {}
-
-    pub inline fn draw(self: *const @This(), surface: *tui.render.Surface) !void {
-        _ = try surface.putText(
-            .{ .x = 1, .y = 1 },
-            if (self.alternate) "x" else "y",
-            .{},
-            .narrow,
-        );
-    }
-};
-
 const BenchmarkFormState = struct {
     button: tui.widget.Button = .{ .label = "apply" },
     checkbox: tui.widget.Checkbox = .{ .label = "verbose" },
@@ -2053,10 +1955,20 @@ const BenchmarkDataState = struct {
     table_provider: BenchmarkTableProvider = .{},
     table_scroll: tui.widget.ScrollState = .{},
     scrollback_viewport: tui.scroll.Viewport = .{},
-    menu: tui.widget.MenuState = .{},
+    overlay_scroll: tui.widget.ScrollState = .{},
 };
 
-const benchmark_menu_labels = [_][]const u8{
+const BenchmarkOverlayProvider = struct {
+    pub fn count(_: *@This()) usize {
+        return benchmark_overlay_labels.len;
+    }
+
+    pub fn row(_: *@This(), index: usize) []const u8 {
+        return benchmark_overlay_labels[index];
+    }
+};
+
+const benchmark_overlay_labels = [_][]const u8{
     "Open file",
     "Save file",
     "Close file",

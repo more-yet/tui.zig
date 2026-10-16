@@ -4,7 +4,7 @@ const kitty = @import("kitty.zig");
 pub const Limits = struct {
     max_payload_bytes: usize = 64 * 1024 * 1024,
     max_pixels: u64 = 100_000_000,
-    /// May reduce, but never increase, `Sender.max_local_name_bytes`.
+    /// Must not exceed `Sender.max_local_name_bytes`.
     max_local_name_bytes: usize = Sender.max_local_name_bytes,
 };
 
@@ -23,9 +23,14 @@ pub const Data = union(kitty.Medium) {
 
 pub const Sender = struct {
     pub const max_source_chunk_bytes = 3_072;
-    pub const max_base64_chunk_bytes = 4_096;
+    pub const max_base64_chunk_bytes = std.base64.standard.Encoder.calcSize(max_source_chunk_bytes);
     pub const max_local_name_bytes = 2_048;
     pub const output_capacity = 4_608;
+
+    comptime {
+        const encoded_capacity = std.base64.standard.Encoder.calcSize(@max(max_source_chunk_bytes, max_local_name_bytes));
+        std.debug.assert(output_capacity >= kitty.max_control_bytes + encoded_capacity + 6);
+    }
 
     const State = enum {
         idle,
@@ -55,8 +60,7 @@ pub const Sender = struct {
         return self.state != .idle;
     }
 
-    /// Starts one validated operation. `data` is borrowed unchanged until the
-    /// operation completes or its cancellation delete is fully acknowledged.
+    /// Keep `data` alive and unchanged until completion, including cancellation output.
     pub fn begin(self: *Sender, command: kitty.Command, data: Data, response: kitty.ResponseMode) !void {
         if (self.state != .idle) return error.TransferActive;
         try self.validate(command, data);
@@ -76,8 +80,7 @@ pub const Sender = struct {
         return self.begin(command, .{ .direct = &.{} }, response);
     }
 
-    /// Requests cancellation. Any accepted prefix remains stable; after its APC
-    /// drains, the selected delete command aborts the terminal-side upload.
+    /// Continue driving output after cancellation to drain the command and send its delete.
     pub fn cancel(self: *Sender, command: kitty.Delete) !void {
         if (self.state != .sending or self.command.transmission() == null) return error.NoActiveTransfer;
         try kitty.validate(.{ .delete = command });
@@ -88,8 +91,8 @@ pub const Sender = struct {
         }
     }
 
-    /// Returns a stable nonempty suffix, or null after completion. The slice is
-    /// valid until its accepted prefix is passed to `consumeOutput`.
+    /// Write the returned suffix, then `try sender.consumeOutput(written)`.
+    /// The suffix stays valid until acknowledged; null means complete, not terminal-confirmed.
     pub fn outputStep(self: *Sender) !?[]const u8 {
         if (self.state == .idle) return null;
         if (self.pending_len != 0) return self.output[self.pending_accepted..self.pending_len];
@@ -133,7 +136,6 @@ pub const Sender = struct {
     }
 
     fn validate(self: *const Sender, command: kitty.Command, data: Data) !void {
-        try kitty.validate(command);
         var control: [kitty.max_control_bytes]u8 = undefined;
         _ = try kitty.encodeControl(&control, command, .{ .response = .none });
         const bytes = data.bytes();
@@ -145,7 +147,7 @@ pub const Sender = struct {
         const tx = transmission.?;
         if (std.meta.activeTag(data) != tx.medium) return error.MediumMismatch;
         if (tx.data_size_bytes > self.limits.max_payload_bytes) return error.PayloadLimitExceeded;
-        const pixels = std.math.mul(u64, tx.width_pixels, tx.height_pixels) catch return error.DimensionOverflow;
+        const pixels = @as(u64, tx.width_pixels) * tx.height_pixels;
         if (pixels > self.limits.max_pixels) return error.PixelLimitExceeded;
         if (tx.format == .rgb or tx.format == .rgba) {
             if (tx.width_pixels == 0 or tx.height_pixels == 0) return error.InvalidDimensions;
@@ -192,7 +194,7 @@ pub const Sender = struct {
         if (width == 0 or height == 0) return error.InvalidPng;
         if (tx.width_pixels != 0 and tx.width_pixels != width) return error.InvalidDimensions;
         if (tx.height_pixels != 0 and tx.height_pixels != height) return error.InvalidDimensions;
-        const pixels = std.math.mul(u64, width, height) catch return error.DimensionOverflow;
+        const pixels = @as(u64, width) * height;
         if (pixels > self.limits.max_pixels) return error.PixelLimitExceeded;
     }
 
@@ -210,13 +212,17 @@ pub const Sender = struct {
             .more_chunks = more,
             .response = self.response,
         });
-        var len: usize = 0;
-        try append(&self.output, &len, "\x1b_G");
-        try append(&self.output, &len, control);
-        try append(&self.output, &len, ";");
-        len += try encodeBase64(self.output[len..], bytes[self.source_offset..][0..source_count]);
-        try append(&self.output, &len, "\x1b\\");
-        self.pending_len = @intCast(len);
+        @memcpy(self.output[0..3], "\x1b_G");
+        @memcpy(self.output[3..][0..control.len], control);
+        var len = 3 + control.len;
+        self.output[len] = ';';
+        len += 1;
+        const encoder = std.base64.standard.Encoder;
+        const encoded_len = encoder.calcSize(source_count);
+        _ = encoder.encode(self.output[len..][0..encoded_len], bytes[self.source_offset..][0..source_count]);
+        len += encoded_len;
+        @memcpy(self.output[len..][0..2], "\x1b\\");
+        self.pending_len = @intCast(len + 2);
     }
 };
 
@@ -225,17 +231,4 @@ fn bigEndianU32(bytes: *const [4]u8) u32 {
         (@as(u32, bytes[1]) << 16) |
         (@as(u32, bytes[2]) << 8) |
         bytes[3];
-}
-
-fn append(buffer: []u8, len: *usize, bytes: []const u8) !void {
-    if (bytes.len > buffer.len - len.*) return error.SenderOutputTooLarge;
-    @memcpy(buffer[len.*..][0..bytes.len], bytes);
-    len.* += bytes.len;
-}
-
-fn encodeBase64(output: []u8, input: []const u8) !usize {
-    const encoder = std.base64.standard.Encoder;
-    const required = encoder.calcSize(input.len);
-    if (output.len < required) return error.SenderOutputTooLarge;
-    return encoder.encode(output[0..required], input).len;
 }

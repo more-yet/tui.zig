@@ -1,16 +1,16 @@
-//! Bounded multiline editing over caller-owned contiguous storage.
-
 const std = @import("std");
-const grapheme = @import("text/grapheme.zig");
-const input = @import("input/event.zig");
-const edit_core = @import("editor/core.zig");
-const memory = @import("core/memory.zig");
-const validation = @import("editor/validation.zig");
-const actions = @import("editor/actions.zig");
-const history_module = @import("editor/history.zig");
-const input_history = @import("editor/input_history.zig");
+const grapheme = @import("../text/grapheme.zig");
+const input = @import("../input/event.zig");
+const memory = @import("../core/memory.zig");
+const validation = @import("validation.zig");
+const actions = @import("actions.zig");
+const history_module = @import("history.zig");
+const input_history = @import("input_history.zig");
 
-pub const Selection = edit_core.Selection;
+pub const Selection = struct {
+    start: usize,
+    end: usize,
+};
 pub const Action = actions.Action;
 pub const ActionMode = actions.Mode;
 pub const defaultAction = actions.defaultAction;
@@ -44,7 +44,6 @@ pub const VisualRow = struct {
     break_kind: VisualBreak,
 };
 
-/// Borrowed visible portion of one cached visual row.
 pub const RowWindow = struct {
     byte_start: u32,
     byte_end: u32,
@@ -53,7 +52,6 @@ pub const RowWindow = struct {
     newline_column: ?u16,
 };
 
-/// Indexed caret paint data for one cached visual row.
 pub const CaretWindow = struct {
     bytes: []const u8,
     byte_offset: u32,
@@ -61,14 +59,13 @@ pub const CaretWindow = struct {
     row: u32,
 };
 
-/// Derived location for one grapheme boundary. Entries are sorted by `offset`.
 pub const Boundary = struct {
     offset: u32,
     row: u32,
     column: u32,
 };
 
-/// Persistent editor memory. The model retains these slices but never an allocator.
+/// Keep slices fixed, disjoint, and alive for the model lifetime.
 pub const Storage = struct {
     text: []u8,
     boundaries: []Boundary,
@@ -76,8 +73,8 @@ pub const Storage = struct {
     paste: []u8,
 };
 
-/// Convenience stack storage for modest editors. Large applications may supply
-/// independently allocated slices through `Storage`.
+/// Example: `var storage: tui.editor.FixedStorage(256) = .{};`
+/// Use `Storage` with one `VisualRow` for compact non-wrapped single-line fields.
 pub fn FixedStorage(comptime text_capacity: usize) type {
     return struct {
         text: [text_capacity]u8 = undefined,
@@ -183,11 +180,12 @@ pub const Model = struct {
     paste_state: PasteState = .idle,
     history: ?*History = null,
 
-    /// Caller storage is the hard memory and adversarial-input work bound.
+    /// Example: `var model = try tui.editor.Model.init(storage.slices(), "hello");`
     pub fn init(storage: Storage, initial: []const u8) InitError!Model {
         return initMode(storage, initial, true);
     }
 
+    /// Rejects newlines. Without wrapping, one visual-row slot is sufficient.
     pub fn initSingleLine(storage: Storage, initial: []const u8) InitError!Model {
         return initMode(storage, initial, false);
     }
@@ -196,9 +194,10 @@ pub const Model = struct {
         if (storage.text.len > std.math.maxInt(u32)) return error.BufferTooSmall;
         if (initial.len > storage.text.len) return error.BufferTooSmall;
         if (storage.boundaries.len < initial.len + 1) return error.IndexCapacityExceeded;
-        if (storage.visual_rows.len < initial.len + 1) return error.IndexCapacityExceeded;
+        const required_rows = if (multiline) initial.len + 1 else 1;
+        if (storage.visual_rows.len < required_rows) return error.IndexCapacityExceeded;
         if (storageSlicesOverlap(storage)) return error.OverlappingStorage;
-        validateText(initial, multiline) catch return error.InvalidText;
+        try validateText(initial, multiline);
         @memmove(storage.text[0..initial.len], initial);
         var result: Model = .{
             .storage = storage.text,
@@ -212,7 +211,7 @@ pub const Model = struct {
             .line_count = 1,
             .multiline = multiline,
         };
-        result.rebuildBoundaries() catch return error.InvalidText;
+        result.rebuildBoundaries();
         result.cursor_boundary = result.boundary_count - 1;
         result.rebuildVisualRows();
         return result;
@@ -222,8 +221,7 @@ pub const Model = struct {
         return self.storage[0..self.len];
     }
 
-    fn rebuildBoundaries(self: *Model) error{ IndexCapacityExceeded, InvalidText }!void {
-        if (self.boundaries.len < self.len + 1) return error.IndexCapacityExceeded;
+    fn rebuildBoundaries(self: *Model) void {
         var iterator = grapheme.Iterator{ .input = self.value() };
         var count: usize = 0;
         var row: u32 = 0;
@@ -236,9 +234,8 @@ pub const Model = struct {
                 row += 1;
                 column = 0;
             } else {
-                const width = cluster.displayWidthAssumeValid(self.width_profile) catch return error.InvalidText;
-                if (width == 0 or cluster.bytes.len > grapheme.max_cluster_bytes) return error.InvalidText;
-                column = std.math.add(u32, column, width) catch return error.InvalidText;
+                const width = cluster.displayWidthAssumeValid(self.width_profile) catch unreachable;
+                column += width;
             }
         }
         self.boundaries[count] = .{ .offset = @intCast(self.len), .row = row, .column = column };
@@ -247,6 +244,16 @@ pub const Model = struct {
     }
 
     fn rebuildVisualRows(self: *Model) void {
+        if (!self.multiline and !self.soft_wrap) {
+            self.visual_row_storage[0] = .{
+                .start = 0,
+                .end = self.len,
+                .width = self.boundaries[self.boundary_count - 1].column,
+                .break_kind = .end,
+            };
+            self.visual_row_count = 1;
+            return;
+        }
         var count: usize = 0;
         var row_start: usize = 0;
         var row_width: usize = 0;
@@ -257,7 +264,6 @@ pub const Model = struct {
             const current = self.boundaries[boundary_index];
             const next = self.boundaries[boundary_index + 1];
             if (current.row != next.row) {
-                std.debug.assert(count < self.visual_row_storage.len);
                 self.visual_row_storage[count] = .{
                     .start = row_start,
                     .end = current.offset,
@@ -273,7 +279,6 @@ pub const Model = struct {
             const cluster_width = next.column - current.column;
             if (wrap_width) |width| {
                 if (row_width != 0 and row_width + cluster_width > width) {
-                    std.debug.assert(count < self.visual_row_storage.len);
                     self.visual_row_storage[count] = .{
                         .start = row_start,
                         .end = current.offset,
@@ -288,7 +293,6 @@ pub const Model = struct {
             row_width += cluster_width;
         }
 
-        std.debug.assert(count < self.visual_row_storage.len);
         self.visual_row_storage[count] = .{
             .start = row_start,
             .end = self.len,
@@ -402,7 +406,10 @@ pub const Model = struct {
     }
 
     pub fn selection(self: *const Model) ?Selection {
-        return edit_core.selection(self.anchor, self.cursorOffset());
+        const anchor = self.anchor orelse return null;
+        const cursor = self.cursorOffset();
+        if (anchor == cursor) return null;
+        return .{ .start = @min(anchor, cursor), .end = @max(anchor, cursor) };
     }
 
     pub fn selectedText(self: *const Model) ?[]const u8 {
@@ -410,7 +417,7 @@ pub const Model = struct {
         return self.value()[selected.start..selected.end];
     }
 
-    /// Returns the current cursor's UTF-8 byte offset.
+    /// UTF-8 byte offset, not display column or grapheme index.
     pub fn cursorOffset(self: *const Model) usize {
         std.debug.assert(self.cursor_boundary < self.boundary_count);
         return self.boundaries[self.cursor_boundary].offset;
@@ -446,9 +453,11 @@ pub const Model = struct {
         return !std.meta.eql(previous, self.viewport);
     }
 
-    /// Wraps visual rows at display-width boundaries without changing stored lines.
-    pub fn setSoftWrap(self: *Model, enabled: bool) bool {
+    /// Example: `_ = try model.setSoftWrap(true);`
+    /// Requires `value().len + 1` row slots when enabled; failure leaves state unchanged.
+    pub fn setSoftWrap(self: *Model, enabled: bool) error{IndexCapacityExceeded}!bool {
         if (self.soft_wrap == enabled) return false;
+        if (enabled and self.visual_row_storage.len < self.len + 1) return error.IndexCapacityExceeded;
         self.soft_wrap = enabled;
         self.cursor_affinity = .forward;
         self.preferred_column = null;
@@ -463,20 +472,17 @@ pub const Model = struct {
         return self.soft_wrap;
     }
 
-    /// Yields borrowed visual rows for the current viewport width.
+    /// Recreate after edits, wrap/width-profile changes, or viewport-width changes.
     pub fn visualRows(self: *const Model) VisualRowIterator {
         return .{ .rows = self.visual_row_storage[0..self.visual_row_count] };
     }
 
-    /// Yields borrowed visual rows beginning at a clamped cached row index.
     pub fn visualRowsFrom(self: *const Model, start: usize) VisualRowIterator {
         const clamped = @min(start, self.visual_row_count);
         return .{ .rows = self.visual_row_storage[clamped..self.visual_row_count] };
     }
 
-    /// Returns only complete graphemes visible in the requested horizontal
-    /// window. A grapheme cut by the left edge is skipped, leaving its screen
-    /// cells blank. The result borrows model text and indexes.
+    /// Borrowed until edits or layout changes; partial edge graphemes are omitted.
     pub fn visibleRowWindow(
         self: *const Model,
         row_index: usize,
@@ -527,8 +533,6 @@ pub const Model = struct {
         };
     }
 
-    /// Returns the grapheme (or blank end cell) used to paint the caret without
-    /// rescanning a line prefix.
     pub fn visibleCaretWindow(
         self: *const Model,
         left_column: usize,
@@ -608,7 +612,7 @@ pub const Model = struct {
     pub fn setWidthProfile(self: *Model, profile: grapheme.WidthProfile) bool {
         if (self.width_profile == profile) return false;
         self.width_profile = profile;
-        self.rebuildBoundaries() catch unreachable;
+        self.rebuildBoundaries();
         self.rebuildVisualRows();
         self.cursor_affinity = .forward;
         self.preferred_column = null;
@@ -653,9 +657,7 @@ pub const Model = struct {
         return self.replaceRange(selected.start, selected.end, replacement);
     }
 
-    /// Validates, attaches, and clears history. Its fixed record and byte
-    /// storage is exclusively borrowed and disjoint from retained model storage
-    /// until detached. Failure leaves both the model and candidate unchanged.
+    /// Clears and exclusively borrows history until detached. Keep its storage disjoint from the model.
     pub fn setHistory(self: *Model, history: ?*History) EditError!void {
         if (history) |history_ptr| {
             const retained = [_][]const u8{
@@ -673,8 +675,7 @@ pub const Model = struct {
         self.history = history;
     }
 
-    /// Discards staged paste bytes without editing, recording history, or
-    /// manufacturing a failure. Call this on an unobserved disable transition.
+    /// Call if disabling and re-enabling a widget without letting it observe the disabled state.
     pub fn cancelPaste(self: *Model) void {
         self.paste_state = .idle;
     }
@@ -729,8 +730,8 @@ pub const Model = struct {
             .paste_chunk => |bytes| self.stagePasteChunk(bytes),
             .paste_end => self.commitStagedPaste(),
             .malformed => self.abortStagedPaste(),
-            else => if (actions.applyDefault(self, event, if (self.multiline) .multiline else .single_line)) |result|
-                result
+            else => if (actions.defaultAction(event, if (self.multiline) .multiline else .single_line)) |action|
+                self.applyAction(action)
             else
                 .{ .status = .ignored },
         };
@@ -828,45 +829,43 @@ pub const Model = struct {
         if (replacement.len > self.storage.len - retained_len) return error.CapacityExceeded;
         const new_len = retained_len + replacement.len;
         if (self.boundaries.len < new_len + 1) return error.CapacityExceeded;
-        if (self.visual_row_storage.len < new_len + 1) return error.CapacityExceeded;
+        const required_rows = if (self.multiline or self.soft_wrap) new_len + 1 else 1;
+        if (self.visual_row_storage.len < required_rows) return error.CapacityExceeded;
         const current = self.value();
         if (!asciiEditIsSafe(current, start, end, replacement, self.multiline)) {
             const left = lineRangeAtOffset(current, start);
             const right = lineRangeAtOffset(current, end);
             if (self.multiline) {
-                validation.validateParts(.lf, .{
+                try validation.validateParts(.lf, .{
                     current[left.start..start],
                     replacement,
                     current[end..right.end],
-                }) catch return error.InvalidText;
+                });
             } else {
-                validation.validateParts(.reject, .{
+                try validation.validateParts(.reject, .{
                     current[left.start..start],
                     replacement,
                     current[end..right.end],
-                }) catch return error.InvalidText;
+                });
             }
         }
         if (start == end and replacement.len == 0) return false;
 
         const history_index = if (record_history) history: {
             const history_ptr = self.history orelse break :history null;
-            break :history history_ptr.record(
+            break :history try history_ptr.record(
                 start,
                 self.storage[start..end],
                 replacement,
                 .{ .cursor = self.cursorOffset(), .anchor = self.anchor },
-            ) catch |err| return switch (err) {
-                error.HistoryCapacityExceeded => error.HistoryCapacityExceeded,
-                error.OverlappingInput => error.OverlappingInput,
-                error.OverlappingStorage => error.OverlappingStorage,
-            };
+            );
         } else null;
 
-        const splice = edit_core.splice(self.storage, self.len, start, end, replacement);
-        const target_tail = splice.target;
-        self.len = splice.new_len;
-        self.rebuildBoundaries() catch unreachable;
+        const target_tail = start + replacement.len;
+        @memmove(self.storage[target_tail..new_len], self.storage[end..self.len]);
+        @memcpy(self.storage[start..target_tail], replacement);
+        self.len = new_len;
+        self.rebuildBoundaries();
         self.rebuildVisualRows();
         self.cursor_boundary = self.snapBoundaryIndex(target_tail, if (replacement.len == 0) .backward else .forward);
         self.anchor = null;

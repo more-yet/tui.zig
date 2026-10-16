@@ -82,7 +82,7 @@ pub fn place(
     constraints: Constraints,
     alignment: Alignment,
 ) Error!geometry.Rect {
-    const bounded = constraints.constrain(desired) catch return error.InvalidConstraint;
+    const bounded = try constraints.constrain(desired);
     if (constraints.min.width > area.width or constraints.min.height > area.height) {
         return error.InsufficientSpace;
     }

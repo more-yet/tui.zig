@@ -193,7 +193,6 @@ pub const Encoder = struct {
         return true;
     }
 
-    /// Hides a cursor already owned by the renderer before changing terminal cells.
     pub fn hideCursor(self: *Encoder) std.Io.Writer.Error!bool {
         if (self.cursor_state.cursor_visibility_known and !self.cursor_state.cursor_visible) return false;
         try self.setCursorVisible(false);

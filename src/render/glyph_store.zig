@@ -13,14 +13,7 @@ pub const Entry = struct {
     refs: usize = 0,
     slot: u32 = 0,
     next_free: u32 = std.math.maxInt(u32),
-    active: bool = false,
 };
-
-pub fn requiredSlots(capacity: usize) usize {
-    var result: usize = 2;
-    while (result < capacity * 2) result *= 2;
-    return result;
-}
 
 pub const Store = struct {
     const empty_slot: u32 = 0;
@@ -32,7 +25,7 @@ pub const Store = struct {
 
     pub fn init(entries: []Entry, slot_storage: []u32) !Store {
         if (entries.len == 0 or entries.len >= complex_tag) return error.InvalidCapacity;
-        const slot_count = requiredSlots(entries.len);
+        const slot_count = slot_index_module.requiredSlots(entries.len);
         if (slot_storage.len < slot_count) return error.BufferTooSmall;
         const slots = slot_storage[0..slot_count];
         @memset(entries, .{});
@@ -88,12 +81,10 @@ pub const Store = struct {
         if (!isComplex(glyph)) return;
         const index = indexOf(glyph);
         const entry = &self.entries[index];
-        std.debug.assert(entry.active);
-        std.debug.assert(entry.refs >= count);
+        std.debug.assert(entry.refs != 0 and entry.refs >= count);
         entry.refs -= count;
         if (entry.refs != 0) return;
         slot_index_module.remove(self.slots, self.entries, entry.slot);
-        entry.active = false;
         entry.next_free = self.free_head;
         self.free_head = @intCast(index);
     }
@@ -126,7 +117,6 @@ pub const Store = struct {
             .hash = hash,
             .refs = 1,
             .slot = @intCast(slot_index),
-            .active = true,
         };
         @memcpy(entry.bytes[0..cluster.len], cluster);
         self.slots[slot_index] = index + 1;

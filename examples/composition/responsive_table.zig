@@ -38,14 +38,7 @@ pub const App = struct {
 
     pub fn handle(self: *App, event: tui.input.Event) tui.widget.Update {
         const areas = self.geometry();
-        var columns = columnsForWidth(areas.table.width);
-        var table = tui.widget.Table(Provider){
-            .provider = self.provider,
-            .state = self.state,
-            .bounds = areas.table,
-            .columns = &columns,
-        };
-        return table.handle(event);
+        return self.state.handle(event, self.provider.count(), areas.table, 1);
     }
 
     pub fn draw(self: *App, surface: *tui.render.Surface) !void {
@@ -64,7 +57,7 @@ pub const App = struct {
         if (!areas.scrollbar.isEmpty()) {
             const bar = tui.widget.Scrollbar{
                 .total_rows = self.provider.count(),
-                .visible_rows = areas.table.height -| 1,
+                .visible_rows = areas.scrollbar.height,
                 .top_row = self.state.top,
             };
             var bar_surface = surface.surface(areas.scrollbar);
@@ -75,10 +68,11 @@ pub const App = struct {
     fn geometry(self: *const App) struct { table: tui.render.Rect, scrollbar: tui.render.Rect } {
         const reserve_bar = self.bounds.width >= 2 and self.bounds.height > 1;
         const table_width = self.bounds.width - @intFromBool(reserve_bar);
+        const body = tui.widget.Table(Provider).bodyRect(.{ .width = table_width, .height = self.bounds.height });
         return .{
             .table = .{ .x = self.bounds.x, .y = self.bounds.y, .width = table_width, .height = self.bounds.height },
             .scrollbar = if (reserve_bar)
-                .{ .x = self.bounds.x + table_width, .y = self.bounds.y + 1, .width = 1, .height = self.bounds.height - 1 }
+                .{ .x = self.bounds.x + table_width, .y = self.bounds.y + body.y, .width = 1, .height = body.height }
             else
                 .{ .x = 0, .y = 0, .width = 0, .height = 0 },
         };

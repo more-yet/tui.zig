@@ -1,7 +1,5 @@
-//! Caller-owned z-order metadata; applications retain drawing, focus, and dispatch policy.
-
 const std = @import("std");
-const render = @import("render.zig");
+const render = @import("../render.zig");
 
 pub const Id = u32;
 

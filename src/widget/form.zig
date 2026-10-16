@@ -1,10 +1,10 @@
-//! Form controls consume events already routed to their focus or hit-test target.
+//! Route events to the focused or hit-tested control before calling `handle()`.
 
 const std = @import("std");
 const input = @import("../input.zig");
 const render = @import("../render.zig");
 const text = @import("../text.zig");
-const theme = @import("../theme.zig");
+const theme = @import("../ui/theme.zig");
 const Update = @import("update.zig").Update;
 
 pub const Button = struct {

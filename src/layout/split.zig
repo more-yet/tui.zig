@@ -96,7 +96,7 @@ fn solve(
     var total_weight: u64 = 0;
     for (segments, 0..) |segment, index| {
         if (segment.min > segment.max) return error.InvalidSegment;
-        minimum_total = std.math.add(u64, minimum_total, segment.min) catch return error.SizeOverflow;
+        minimum_total += segment.min;
         if (minimum_total > available) return error.InsufficientSpace;
         if (segment.min < segment.max) {
             total_weight = std.math.add(u64, total_weight, segment.weight) catch return error.SizeOverflow;
@@ -170,14 +170,14 @@ fn solve(
             if (distributed == round_remaining) break;
         }
         if (distributed == 0) break;
-        remaining -= @min(remaining, distributed);
+        remaining -= distributed;
         if (remaining != 0) {
             total_weight = 0;
             for (segments, 0..) |segment, index| {
                 const result = output[index * stride];
                 const length = if (axis == .horizontal) result.width else result.height;
                 if (length < segment.max) {
-                    total_weight = std.math.add(u64, total_weight, segment.weight) catch return error.SizeOverflow;
+                    total_weight += segment.weight;
                 }
             }
         }

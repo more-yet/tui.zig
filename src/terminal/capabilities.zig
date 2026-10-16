@@ -15,17 +15,15 @@ pub const FeatureSupport = enum {
     supported,
 };
 
-/// Caller-supplied terminal policy. Negotiation never changes these values.
+/// Explicit policy overrides remain unchanged by negotiation.
 pub const Profile = struct {
     color_depth: ColorDepth = .ansi16,
-    background_color_erase: bool = false,
     width_profile: grapheme.WidthProfile = .narrow,
 };
 
 pub const Capabilities = struct {
     color_depth: ColorDepth = .ansi16,
     synchronized_output: bool = false,
-    background_color_erase: bool = false,
     kitty_keyboard: bool = false,
     kitty_graphics: bool = false,
     width_profile: grapheme.WidthProfile = .narrow,
@@ -49,13 +47,11 @@ const FeatureState = enum {
 const query_bytes = "\x1b[?u\x1b[c\x1b[?2026$p";
 
 pub const ProbeFailure = struct {
-    /// Both slices borrow the terminal-reply event and are valid only as long
-    /// as that event's storage remains valid.
+    /// Copy borrowed reply slices before advancing the input parser.
     code: []const u8,
     message: []const u8,
 };
 
-/// One bounded negotiation epoch for retained behavioral extensions.
 pub const Negotiator = struct {
     profile: Profile = .{},
     kitty_keyboard: FeatureState = .unknown,
@@ -72,7 +68,6 @@ pub const Negotiator = struct {
         return .{
             .color_depth = self.profile.color_depth,
             .synchronized_output = self.synchronized_output == .supported,
-            .background_color_erase = self.profile.background_color_erase,
             .kitty_keyboard = self.kitty_keyboard == .supported,
             .kitty_graphics = self.kitty_graphics == .supported,
             .width_profile = self.profile.width_profile,
@@ -94,10 +89,7 @@ pub const Negotiator = struct {
         return query_bytes;
     }
 
-    /// Starts opt-in graphics negotiation plus the existing keyboard,
-    /// device-attributes, and synchronized-output queries. The nonzero probe ID
-    /// is application-owned and must not be reused while an old reply can arrive.
-    /// The returned slice borrows this negotiator until another query begins.
+    /// Use a fresh nonzero probe ID. Write the returned bytes before starting another query.
     pub fn beginGraphicsQueries(self: *Negotiator, probe_id: u32) ![]const u8 {
         if (probe_id == 0) return error.InvalidProbeId;
         if (self.kitty_graphics == .pending) return error.GraphicsQueryPending;
@@ -109,7 +101,7 @@ pub const Negotiator = struct {
             &self.query_storage,
             "\x1b_Ga=q,f=24,t=d,s=1,v=1,i={d};AAAA\x1b\\{s}",
             .{ probe_id, query_bytes },
-        ) catch return error.QueryBufferTooSmall;
+        ) catch unreachable;
     }
 
     pub fn cancelQueries(self: *Negotiator) void {

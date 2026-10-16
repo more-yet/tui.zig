@@ -15,7 +15,7 @@ pub const Cluster = struct {
         return width(self.bytes, profile);
     }
 
-    /// Requires valid UTF-8 and is intended for clusters returned by `Iterator`.
+    /// Pass a valid UTF-8 cluster from `Iterator`.
     pub fn displayWidthAssumeValid(self: Cluster, profile: WidthProfile) WidthError!u2 {
         return widthValidated(self.bytes, profile);
     }

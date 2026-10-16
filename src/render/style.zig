@@ -11,7 +11,7 @@ pub const Color = union(enum(u8)) {
     default,
     indexed: u8,
     rgb: Rgb,
-    /// Exact protocol data. Unlike ordinary RGB, this is never quantized.
+    /// Image IDs are exact colors; do not substitute an ordinary RGB style.
     protocol_rgb: Rgb,
 };
 
@@ -57,14 +57,7 @@ pub const Entry = struct {
     refs: usize = 0,
     slot: u32 = 0,
     next_free: u32 = std.math.maxInt(u32),
-    active: bool = false,
 };
-
-pub fn requiredSlots(capacity: usize) usize {
-    var result: usize = 2;
-    while (result < capacity * 2) result *= 2;
-    return result;
-}
 
 pub const Table = struct {
     const empty_slot: u32 = 0;
@@ -76,13 +69,12 @@ pub const Table = struct {
 
     pub fn init(entries: []Entry, slot_storage: []u32) !Table {
         if (entries.len == 0 or entries.len > std.math.maxInt(u16)) return error.InvalidCapacity;
-        const slot_count = requiredSlots(entries.len);
+        const slot_count = slot_index_module.requiredSlots(entries.len);
         if (slot_storage.len < slot_count) return error.BufferTooSmall;
         const slots = slot_storage[0..slot_count];
         @memset(slots, empty_slot);
         @memset(entries, .{});
 
-        entries[0] = .{ .style = .{}, .hash = (Style{}).hash(), .active = true };
         var free_head = no_entry;
         var index: usize = entries.len;
         while (index > 1) {
@@ -132,7 +124,6 @@ pub const Table = struct {
     pub fn releaseMany(self: *Table, id: Id, count: usize) void {
         if (id == 0) return;
         const entry = &self.entries[id];
-        std.debug.assert(entry.active);
         std.debug.assert(entry.refs >= count);
         entry.refs -= count;
     }
@@ -154,7 +145,6 @@ pub const Table = struct {
             .hash = hash,
             .refs = 1,
             .slot = @intCast(destination),
-            .active = true,
         };
         self.slots[destination] = index + 1;
         return @intCast(index);
@@ -171,7 +161,7 @@ pub const Table = struct {
 
     fn evict(self: *Table) ?u32 {
         for (self.entries[1..], 1..) |*entry, index| {
-            if (!entry.active or entry.refs != 0) continue;
+            if (entry.refs != 0) continue;
             slot_index_module.remove(self.slots, self.entries, entry.slot);
             return @intCast(index);
         }

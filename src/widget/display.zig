@@ -1,6 +1,6 @@
 const render = @import("../render.zig");
 const text = @import("../text.zig");
-const theme = @import("../theme.zig");
+const theme = @import("../ui/theme.zig");
 
 pub const Label = struct {
     text: []const u8,
@@ -98,46 +98,17 @@ pub const Gauge = struct {
     empty: theme.Role = .{},
     state: theme.State = .normal,
 
+    /// Filled cells for custom drawing, e.g. `gauge.filledWidth(surface.size().width)`.
+    pub fn filledWidth(self: *const Gauge, width: u16) u16 {
+        if (self.total == 0) return 0;
+        return @intCast((@as(u128, @min(self.value, self.total)) * width) / self.total);
+    }
+
     pub fn draw(self: *const Gauge, surface: *render.Surface) !void {
         const size = surface.size();
         if (size.width == 0 or size.height == 0) return;
-        const filled_width: u16 = if (self.total == 0)
-            0
-        else
-            @intCast((@as(u128, @min(self.value, self.total)) * size.width) / self.total);
-        try putRepeated(
-            surface,
-            .{ .x = 0, .y = 0 },
-            &filled_cells,
-            filled_width,
-            self.filled.resolve(self.state),
-        );
-        try putRepeated(
-            surface,
-            .{ .x = filled_width, .y = 0 },
-            &empty_cells,
-            size.width - filled_width,
-            self.empty.resolve(self.state),
-        );
+        const filled_width = self.filledWidth(size.width);
+        try surface.fillAscii(.{ .x = 0, .y = 0, .width = filled_width, .height = 1 }, '#', self.filled.resolve(self.state));
+        try surface.fillAscii(.{ .x = filled_width, .y = 0, .width = size.width - filled_width, .height = 1 }, '-', self.empty.resolve(self.state));
     }
 };
-
-const filled_cells: [64]u8 = @splat('#');
-const empty_cells: [64]u8 = @splat('-');
-
-fn putRepeated(
-    surface: *render.Surface,
-    origin: render.Point,
-    pattern: []const u8,
-    count: u16,
-    style: render.Style,
-) !void {
-    var x = origin.x;
-    var remaining = count;
-    while (remaining != 0) {
-        const chunk: u16 = @intCast(@min(@as(usize, remaining), pattern.len));
-        _ = try surface.putText(.{ .x = x, .y = origin.y }, pattern[0..chunk], style, .narrow);
-        x += chunk;
-        remaining -= chunk;
-    }
-}

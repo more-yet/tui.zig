@@ -43,8 +43,6 @@ pub const Map = struct {
         @memset(rows, .{});
 
         const tile_columns: u16 = @intCast((@as(u32, size.width) + tile_width - 1) / tile_width);
-        const tile_rows: u16 = @intCast((@as(u32, size.height) + tile_height - 1) / tile_height);
-        _ = tile_rows;
         const tile_bits = tile_storage;
         @memset(tile_bits, 0);
 
@@ -57,12 +55,7 @@ pub const Map = struct {
     }
 
     pub fn canResize(self: *const Map, size: geometry.Size) bool {
-        if (size.height > self.rows.len) return false;
-        const tile_columns = (@as(usize, size.width) + tile_width - 1) / tile_width;
-        const tile_rows = (@as(usize, size.height) + tile_height - 1) / tile_height;
-        const tile_count = tile_columns * tile_rows;
-        const word_bits = @bitSizeOf(usize);
-        return (tile_count + word_bits - 1) / word_bits <= self.tile_bits.len;
+        return size.height <= self.rows.len and requiredTileWords(size) <= self.tile_bits.len;
     }
 
     pub fn resizeWithinCapacity(self: *Map, size: geometry.Size) void {
@@ -220,7 +213,6 @@ pub const Map = struct {
         self.resetScalars();
     }
 
-    /// Clears damage incrementally. Each cleared row or tile word consumes one work unit.
     pub fn resetStep(self: *Map, progress: *ResetProgress, work_budget: *u32) bool {
         if (self.fully_dirty or self.dirty_row_count == 0) {
             self.resetScalars();

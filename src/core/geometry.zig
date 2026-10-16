@@ -1,11 +1,9 @@
-const std = @import("std");
-
 pub const Size = struct {
     width: u16,
     height: u16,
 
-    pub fn cellCount(self: Size) error{Overflow}!usize {
-        return std.math.mul(usize, self.width, self.height) catch error.Overflow;
+    pub fn cellCount(self: Size) usize {
+        return @as(usize, self.width) * self.height;
     }
 };
 

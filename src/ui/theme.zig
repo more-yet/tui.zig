@@ -1,4 +1,4 @@
-const render = @import("render.zig");
+const render = @import("../render.zig");
 
 pub const State = enum(u2) {
     normal,
@@ -11,7 +11,7 @@ pub const State = enum(u2) {
     }
 };
 
-/// Optional states replace the complete normal style; fields are not merged.
+/// State styles replace `normal` completely; they do not merge individual fields.
 pub const Role = struct {
     normal: render.Style = .{},
     focused: ?render.Style = null,

@@ -100,7 +100,6 @@ fn Spans(comptime Span: type) type {
         spans: []const Span,
 
         inline fn init(spans: Input) Self {
-            comptime std.debug.assert(@hasField(Span, "text"));
             return .{ .spans = spans };
         }
 
@@ -152,15 +151,12 @@ fn Spans(comptime Span: type) type {
     };
 }
 
-/// Lazily yields borrowed lines, trimming ASCII spaces at visual edges.
-/// It prefers Unicode 17 default line-break opportunities and otherwise splits
-/// at a grapheme boundary.
-/// LF and CRLF create explicit breaks; other controls are rejected at initialization.
+/// Keep input alive while using returned lines. LF/CRLF break lines;
+/// wrapping trims edge spaces and never splits a grapheme.
 pub const Iterator = WrapIterator(Bytes);
 
-/// Internal span-aware instantiation used by styled rendering. Each span must
-/// expose a borrowed `text: []const u8` field and remains an independent UTF-8
-/// and grapheme segment while line-break state continues between spans.
+/// Each span needs `text: []const u8` containing complete UTF-8 graphemes.
+/// Keep spans and their text alive while using the iterator or returned lines.
 pub fn SpanIterator(comptime Span: type) type {
     return WrapIterator(Spans(Span));
 }

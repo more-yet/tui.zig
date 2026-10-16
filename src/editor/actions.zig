@@ -31,46 +31,29 @@ pub const Action = union(enum) {
     redo,
 };
 
-/// Maps conventional key bindings to semantic actions. Applications may bypass it.
 pub inline fn defaultAction(event: input.Event, mode: Mode) ?Action {
     return switch (event) {
         .text => |bytes| .{ .insert_text = bytes },
-        .key => |key| mapKey(Action, {}, key, mode, returnAction),
+        .key => |key| keyAction(key, mode),
         else => null,
     };
 }
 
-/// Applies conventional bindings without forcing callers through an intermediate action value.
-pub inline fn applyDefault(context: anytype, event: input.Event, mode: Mode) ?ApplyResult(@TypeOf(context)) {
-    const Result = ApplyResult(@TypeOf(context));
-    return switch (event) {
-        .text => |bytes| applyAction(context, .{ .insert_text = bytes }),
-        .key => |key| mapKey(Result, context, key, mode, applyAction),
-        else => null,
-    };
-}
-
-inline fn mapKey(
-    comptime Result: type,
-    context: anytype,
-    key: input.Key,
-    mode: Mode,
-    comptime emit: anytype,
-) ?Result {
+inline fn keyAction(key: input.Key, mode: Mode) ?Action {
     if (key.action == .release or key.modifiers.alt or key.modifiers.super or
         key.modifiers.hyper or key.modifiers.meta) return null;
     const extend = key.modifiers.shift;
     if (key.modifiers.control) {
         return switch (key.code) {
-            .left => emit(context, .{ .move_word_left = extend }),
-            .right => emit(context, .{ .move_word_right = extend }),
-            .backspace => if (!extend) emit(context, .delete_word_backward) else null,
-            .delete => if (!extend) emit(context, .delete_word_forward) else null,
+            .left => .{ .move_word_left = extend },
+            .right => .{ .move_word_right = extend },
+            .backspace => if (!extend) .delete_word_backward else null,
+            .delete => if (!extend) .delete_word_forward else null,
             .codepoint => |codepoint| if (!extend and codepoint <= std.math.maxInt(u8))
                 switch (std.ascii.toLower(@as(u8, @intCast(codepoint)))) {
-                    'a' => emit(context, .select_all),
-                    'z' => emit(context, .undo),
-                    'y' => emit(context, .redo),
+                    'a' => .select_all,
+                    'z' => .undo,
+                    'y' => .redo,
                     else => null,
                 }
             else
@@ -79,38 +62,25 @@ inline fn mapKey(
         };
     }
     return switch (key.code) {
-        .left => emit(context, .{ .move_left = extend }),
-        .right => emit(context, .{ .move_right = extend }),
-        .up => if (mode == .multiline) emit(context, .{ .move_up = extend }) else null,
-        .down => if (mode == .multiline) emit(context, .{ .move_down = extend }) else null,
-        .home => emit(context, .{ .move_home = extend }),
-        .end => emit(context, .{ .move_end = extend }),
-        .page_up => if (mode == .multiline) emit(context, .{ .page_up = extend }) else null,
-        .page_down => if (mode == .multiline) emit(context, .{ .page_down = extend }) else null,
-        .backspace => if (!extend) emit(context, .delete_backward) else null,
-        .delete => if (!extend) emit(context, .delete_forward) else null,
-        .enter => if (!extend and mode == .multiline) emit(context, .insert_newline) else null,
-        .codepoint => |codepoint| if (!extend) emit(context, .{ .insert_codepoint = codepoint }) else null,
+        .left => .{ .move_left = extend },
+        .right => .{ .move_right = extend },
+        .up => if (mode == .multiline) .{ .move_up = extend } else null,
+        .down => if (mode == .multiline) .{ .move_down = extend } else null,
+        .home => .{ .move_home = extend },
+        .end => .{ .move_end = extend },
+        .page_up => if (mode == .multiline) .{ .page_up = extend } else null,
+        .page_down => if (mode == .multiline) .{ .page_down = extend } else null,
+        .backspace => if (!extend) .delete_backward else null,
+        .delete => if (!extend) .delete_forward else null,
+        .enter => if (!extend and mode == .multiline) .insert_newline else null,
+        .codepoint => |codepoint| if (!extend) .{ .insert_codepoint = codepoint } else null,
         else => null,
     };
 }
 
-inline fn applyAction(context: anytype, action: Action) @TypeOf(context.applyAction(action)) {
-    return context.applyAction(action);
-}
-
-inline fn returnAction(_: void, action: Action) Action {
-    return action;
-}
-
-fn ApplyResult(comptime Context: type) type {
-    const Target = std.meta.Child(Context);
-    return @typeInfo(@TypeOf(Target.applyAction)).@"fn".return_type.?;
-}
-
 pub fn previousWordStart(value: []const u8, cursor: usize) usize {
     std.debug.assert(cursor <= value.len);
-    var boundaries = word_break.Iterator.init(value) catch unreachable;
+    var boundaries = word_break.Iterator{ .input = value };
     var start: usize = 0;
     var candidate: usize = 0;
     _ = boundaries.next().?;
@@ -125,7 +95,7 @@ pub fn previousWordStart(value: []const u8, cursor: usize) usize {
 
 pub fn nextWordEnd(value: []const u8, cursor: usize) usize {
     std.debug.assert(cursor <= value.len);
-    var boundaries = word_break.Iterator.init(value) catch unreachable;
+    var boundaries = word_break.Iterator{ .input = value };
     var start: usize = 0;
     _ = boundaries.next().?;
     while (boundaries.next()) |boundary| {

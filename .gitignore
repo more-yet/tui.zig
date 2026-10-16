@@ -1,9 +1,7 @@
 .zig-cache/
 zig-pkg/
 zig-out/
-bindings/
 
-# Local configuration and secret material
 .env
 .env.*
 .envrc
@@ -17,7 +15,6 @@ bindings/
 *.pem
 *.pfx
 
-# Local editor and operating-system state
 .DS_Store
 .idea/
 .vscode/

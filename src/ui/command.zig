@@ -1,5 +1,5 @@
 const std = @import("std");
-const input = @import("input.zig");
+const input = @import("../input.zig");
 
 pub const Id = u32;
 pub const Context = u32;

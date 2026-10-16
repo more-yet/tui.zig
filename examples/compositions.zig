@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     var name_model = try tui.editor.Model.initSingleLine(name_storage.slices(), "Ada");
     var password_storage: tui.editor.FixedStorage(32) = .{};
     var password_model = try tui.editor.Model.initSingleLine(password_storage.slices(), "secret");
-    var focus_storage: [4]tui.focus.Node = undefined;
+    var focus_storage: [4]tui.focus.Target = undefined;
     var form = try forms.App.init(&name_model, &password_model, &focus_storage);
     try form.layout(renderer.size());
     try draw(&renderer, &form);

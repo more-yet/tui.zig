@@ -30,7 +30,7 @@ pub const App = struct {
     pub fn init(
         name_model: *tui.editor.Model,
         password_model: *tui.editor.Model,
-        focus_storage: []tui.focus.Node,
+        focus_storage: []tui.focus.Target,
     ) !App {
         var password = tui.widget.TextInput.init(password_model);
         password.display_mode = .masked;
