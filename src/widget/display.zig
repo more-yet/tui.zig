@@ -27,6 +27,13 @@ pub const Paragraph = struct {
     state: theme.State = .normal,
     width_profile: text.WidthProfile = .narrow,
     alignment: text.TextAlignment = .left,
+    first_row: usize = 0,
+
+    /// Total wrapped rows at this width, independent of first_row. Borrows text.
+    pub fn rowCount(self: *const Paragraph, width: u16) text.WrapError!usize {
+        const lines = try text.WrapIterator.init(self.text, width, self.width_profile);
+        return lines.countRemaining();
+    }
 
     pub fn draw(self: *const Paragraph, surface: *render.Surface) !void {
         _ = try surface.putWrappedText(
@@ -34,7 +41,7 @@ pub const Paragraph = struct {
             self.text,
             self.role.resolve(self.state),
             self.width_profile,
-            self.alignment,
+            .{ .alignment = self.alignment, .first_row = self.first_row },
         );
     }
 };

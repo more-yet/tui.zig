@@ -64,6 +64,13 @@ pub const History = struct {
         self.transaction_depth = 0;
     }
 
+    /// Expires borrowed edits; requires exclusive access, including from an attached model.
+    pub fn secureClear(self: *History) void {
+        memory.secureZero(std.mem.sliceAsBytes(self.records));
+        memory.secureZero(self.bytes);
+        self.clear();
+    }
+
     pub fn canUndo(self: *const History) bool {
         return self.cursor != 0;
     }

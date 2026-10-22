@@ -75,12 +75,13 @@ test "input state distinguishes buffered bytes queued events incomplete framing 
     defer reader.close(io);
     var writer_open = true;
     defer if (writer_open) writer.close(io);
-    var buffer: [32]u8 = undefined;
+    var buffer: [32]u8 = @splat(0xaa);
     var timers: [0]tui.runtime.TimerSlot = .{};
     var runtime = try tui.runtime.Posix.init(io, reader, &buffer, &timers, .{
         .input_timeouts = .{ .sequence = .fromMilliseconds(60_000) },
     });
-    defer runtime.deinit();
+    var live = true;
+    defer if (live) runtime.deinit();
 
     try writer.writeStreamingAll(io, "\x1b[200~ab\x1b[201~");
     try testing.expectEqual(tui.runtime.InputState{ .buffered_work = false, .pending = .none }, runtime.inputState());
@@ -94,6 +95,7 @@ test "input state distinguishes buffered bytes queued events incomplete framing 
     try writer.writeStreamingAll(io, "\x1b[");
     try testing.expect(try runtime.pollWithSources(&.{}, &slots) == null);
     try testing.expectEqual(tui.runtime.InputState{ .buffered_work = false, .pending = .sequence }, runtime.inputState());
+    try testing.expectError(error.InputPending, runtime.secureDeinit());
     writer.close(io);
     writer_open = false;
     try testing.expect(try runtime.pollWithSources(&.{}, &slots) == null);
@@ -104,4 +106,45 @@ test "input state distinguishes buffered bytes queued events incomplete framing 
     try testing.expect(runtime.inputState().buffered_work);
     try testing.expect((try runtime.step()) == .eof);
     try testing.expectEqual(tui.runtime.InputState{ .buffered_work = false, .pending = .none }, runtime.inputState());
+    try runtime.secureDeinit();
+    live = false;
+    try testing.expect(std.mem.allEqual(u8, &buffer, 0));
+    try testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&runtime), 0));
+}
+
+extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termios: ?*const tui.terminal.Termios, winsize: ?*const std.posix.winsize) c_int;
+
+test "resize hints preserve pixel changes unchanged geometry and unknown pixels" {
+    var master: c_int = -1;
+    var slave: c_int = -1;
+    const initial: std.posix.winsize = .{ .col = 100, .row = 30, .xpixel = 1000, .ypixel = 600 };
+    if (openpty(&master, &slave, null, null, &initial) != 0) return error.PtyUnavailable;
+    defer _ = std.os.linux.close(master);
+    defer _ = std.os.linux.close(slave);
+    const io = testing.io;
+    const fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+    const reader: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
+    const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
+    defer reader.close(io);
+    defer writer.close(io);
+    var bytes: [16]u8 = undefined;
+    var timers: [0]tui.runtime.TimerSlot = .{};
+    var runtime = try tui.runtime.Posix.init(io, reader, &bytes, &timers, .{ .resize = .{ .handle = slave, .flags = .{ .nonblocking = false } } });
+    defer runtime.deinit();
+    for ([_]std.posix.winsize{
+        initial,
+        .{ .col = 100, .row = 30, .xpixel = 1200, .ypixel = 720 },
+        .{ .col = 100, .row = 30, .xpixel = 1200, .ypixel = 720 },
+        .{ .col = 100, .row = 30, .xpixel = 0, .ypixel = 0 },
+    }) |size| {
+        try testing.expect(std.posix.system.ioctl(slave, @as(u32, std.posix.T.IOCSWINSZ), @intFromPtr(&size)) == 0);
+        try runtime.notifier().requestResize();
+        var slots: [3]tui.runtime.PollSlot = undefined;
+        const event = (try runtime.pollWithSources(&.{}, &slots)).?;
+        try testing.expectEqual(tui.terminal.Geometry{
+            .cells = .{ .width = 100, .height = 30 },
+            .pixels = if (size.xpixel == 0) null else .{ .width = size.xpixel, .height = size.ypixel },
+        }, event.resize);
+        try testing.expect(try runtime.pollWithSources(&.{}, &slots) == null);
+    }
 }

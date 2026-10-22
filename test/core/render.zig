@@ -74,3 +74,45 @@ test "failed styled draws preserve valid cells and succeed after releasing capac
         try testing.expect(cell.style.eql(unavailable_style));
     }
 }
+
+test "wrapped viewports use the same measured rows and styles after width and offset changes" {
+    const text = "alpha beta\n\u{754c} e\u{301} tail\nlast line\n";
+    const spans = [_]tui.render.StyledSpan{
+        .{ .text = "alpha beta\n", .style = pinned_style },
+        .{ .text = "\u{754c} e\u{301} tail\nlast line\n", .style = unavailable_style },
+    };
+    inline for (.{ false, true }) |styled| {
+        var full_storage: tui.render.FixedRendererStorage(12, 16, 32, 8) = .{};
+        var full = try tui.render.Renderer.init(full_storage.slices(), .{ .width = 12, .height = 16 });
+        defer full.deinit();
+        var small_storage: tui.render.FixedRendererStorage(12, 2, 32, 8) = .{};
+        var small = try tui.render.Renderer.init(small_storage.slices(), .{ .width = 12, .height = 2 });
+        defer small.deinit();
+        for ([_]u16{ 8, 12 }) |width| {
+            var all = full.surface(.{ .x = 0, .y = 0, .width = width, .height = 16 });
+            var view = small.surface(.{ .x = 0, .y = 0, .width = width, .height = 2 });
+            const paragraph = tui.widget.Paragraph{ .text = text };
+            const count = try paragraph.rowCount(width);
+            const rendered = if (styled)
+                try all.putWrappedStyledText(tui.render.Rect.fromSize(all.size()), &spans, .{}, .narrow, .{ .alignment = .right })
+            else
+                try all.putWrappedText(tui.render.Rect.fromSize(all.size()), text, .{}, .narrow, .{ .alignment = .right });
+            try testing.expectEqual(count, rendered);
+            for ([_]usize{ 1, count + 1 }) |first_row| {
+                if (styled) {
+                    _ = try view.putWrappedStyledText(tui.render.Rect.fromSize(view.size()), &spans, .{}, .narrow, .{ .alignment = .right, .first_row = first_row });
+                } else {
+                    _ = try view.putWrappedText(tui.render.Rect.fromSize(view.size()), text, .{}, .narrow, .{ .alignment = .right, .first_row = first_row });
+                }
+                var a_buf: [tui.text.max_grapheme_bytes]u8 = undefined;
+                var b_buf: [tui.text.max_grapheme_bytes]u8 = undefined;
+                for (0..2) |y| for (0..width) |x| {
+                    const a = full.desiredCellView(.{ .x = @intCast(x), .y = @intCast(y + first_row) }, &a_buf).?;
+                    const b = small.desiredCellView(.{ .x = @intCast(x), .y = @intCast(y) }, &b_buf).?;
+                    try testing.expectEqualStrings(a.glyph, b.glyph);
+                    try testing.expect(a.style.eql(b.style));
+                };
+            }
+        }
+    }
+}

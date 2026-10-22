@@ -8,16 +8,12 @@ pub const Row = struct {
 
 pub const Provider = struct {
     rows: []const Row,
-    cell_calls: usize = 0,
-    column_calls: [3]usize = @splat(0),
 
     pub fn count(self: *const Provider) usize {
         return self.rows.len;
     }
 
-    pub fn cell(self: *Provider, row: usize, column: usize) []const u8 {
-        self.cell_calls += 1;
-        self.column_calls[column] += 1;
+    pub fn cell(self: *const Provider, row: usize, column: usize) []const u8 {
         return switch (column) {
             0 => self.rows[row].name,
             1 => self.rows[row].status,

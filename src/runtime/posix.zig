@@ -1,7 +1,7 @@
 const std = @import("std");
 const input = @import("../input.zig");
-const render = @import("../render.zig");
 const terminal = @import("../terminal.zig");
+const memory = @import("../core/memory.zig");
 
 pub const TimerId = u32;
 
@@ -28,7 +28,7 @@ pub const Event = union(enum) {
     input_failure: input.Parser.Failure,
     eof,
     wakeup,
-    resize: render.Size,
+    resize: terminal.Geometry,
     signal: Signal,
     timer: TimerEvent,
     ready: ReadyEvent,
@@ -87,14 +87,9 @@ pub const InputState = struct {
     pending: input.Parser.Pending,
 };
 
-pub const ResizeSource = struct {
-    file: std.Io.File,
-    initial_size: render.Size,
-};
-
 pub const Options = struct {
     input_timeouts: InputTimeouts = .{},
-    resize: ?ResizeSource = null,
+    resize: ?std.Io.File = null,
     signals: ?*SignalSource = null,
 };
 
@@ -248,7 +243,7 @@ fn signalBit(signal: std.posix.SIG) u8 {
 
 fn signalNumberBit(number: u32) u8 {
     inline for (managed_signals) |signal| {
-        if (number == @intFromEnum(signal)) return signalBit(signal);
+        if (number == @backingInt(signal)) return signalBit(signal);
     }
     return 0;
 }
@@ -289,7 +284,7 @@ pub const Posix = struct {
     timers: []TimerSlot,
     timer_count: usize = 0,
     options: Options,
-    last_size: ?render.Size,
+    input_cancel_pending: bool = false,
     resize_requested: bool = false,
     wakeup_pending: bool = false,
     signal_interrupt_pending: bool = false,
@@ -318,9 +313,6 @@ pub const Posix = struct {
         if (!input_nonblocking) return error.BlockingInput;
         try validateDuration(options.input_timeouts.escape);
         try validateDuration(options.input_timeouts.sequence);
-        if (options.resize) |resize| {
-            if (resize.initial_size.width == 0 or resize.initial_size.height == 0) return error.InvalidInitialSize;
-        }
         if (options.signals) |signals| {
             if (signals.attached) return error.SignalSourceAlreadyAttached;
             if (signals.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
@@ -335,7 +327,6 @@ pub const Posix = struct {
             .read_buffer = read_buffer,
             .timers = timer_storage,
             .options = options,
-            .last_size = if (options.resize) |resize| resize.initial_size else null,
             .wake_read = .{ .handle = wake_fd, .flags = .{ .nonblocking = true } },
             .shared_wake = .{ .fd = wake_fd },
         };
@@ -346,6 +337,17 @@ pub const Posix = struct {
         if (self.options.signals) |signals| signals.attached = false;
         self.wake_read.close(self.io);
         self.* = undefined;
+    }
+
+    /// Join notifier users and end event borrows first. Wipes the full read buffer,
+    /// not timers, SignalSource, or kernel input. Reinitialize before reuse.
+    pub fn secureDeinit(self: *Posix) error{InputPending}!void {
+        const state = self.inputState();
+        if (state.buffered_work or state.pending != .none) return error.InputPending;
+        const read_buffer = self.read_buffer;
+        self.deinit();
+        memory.secureZero(read_buffer);
+        memory.secureZero(std.mem.asBytes(self));
     }
 
     /// Keep runtime at a fixed address while sharing this handle.
@@ -390,7 +392,7 @@ pub const Posix = struct {
     /// Example: `const locally_idle = !state.buffered_work and state.pending == .none;`
     pub fn inputState(self: *const Posix) InputState {
         return .{
-            .buffered_work = self.input_start != self.input_end or self.parser.hasQueuedEvent() or
+            .buffered_work = self.input_cancel_pending or self.input_start != self.input_end or self.parser.hasQueuedEvent() or
                 self.input_lifecycle == .draining or self.input_lifecycle == .eof_pending,
             .pending = self.parser.pending(),
         };
@@ -595,12 +597,8 @@ pub const Posix = struct {
     fn takeResize(self: *Posix) !?Event {
         const resize = self.options.resize orelse return null;
         if (!self.resize_requested) return null;
-        const size = try terminal.querySize(resize.file);
+        const size = try terminal.queryGeometry(resize);
         self.resize_requested = false;
-        if (self.last_size) |last| {
-            if (last.width == size.width and last.height == size.height) return null;
-        }
-        self.last_size = size;
         return .{ .resize = size };
     }
 
@@ -633,6 +631,12 @@ pub const Posix = struct {
         std.debug.assert(byte_budget != 0);
         if (self.parser.hasQueuedEvent()) {
             const result = self.parser.next("");
+            return .{ .bytes_consumed = 0, .event = parserEvent(result) };
+        }
+        if (self.input_cancel_pending) {
+            self.input_cancel_pending = false;
+            const result = self.parser.cancelPending();
+            try self.updateParserDeadline(std.Io.Clock.awake.now(self.io).nanoseconds);
             return .{ .bytes_consumed = 0, .event = parserEvent(result) };
         }
         if (self.input_lifecycle == .draining) {
@@ -707,7 +711,7 @@ pub const Posix = struct {
         self.signal_continue_pending = self.signal_continue_pending or pending & signal_continue != 0;
         self.resize_requested = self.resize_requested or pending & (signal_resize | signal_continue) != 0;
         if (pending & (signal_suspend | signal_continue) != 0) {
-            self.parser.reset();
+            self.input_cancel_pending = true;
             self.parser_deadline_ns = null;
         }
     }

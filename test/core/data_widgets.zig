@@ -59,3 +59,68 @@ test "list and table reveal on resize but preserve wheel scrolling until navigat
         try testing.expectEqual(@as(usize, 0), state.top);
     }
 }
+
+test "uniform multirow items share drawing hit testing paging and selection visibility" {
+    const WrappedProvider = struct {
+        len: usize = 6,
+        pub fn count(self: *@This()) usize {
+            return self.len;
+        }
+        pub fn row(_: *@This(), _: usize) []const u8 {
+            return "alpha beta";
+        }
+        pub fn cell(self: *@This(), index: usize, _: usize) []const u8 {
+            return self.row(index);
+        }
+    };
+    inline for (.{ false, true }) |table| {
+        var provider: WrappedProvider = .{};
+        var state: tui.widget.ScrollState = .{ .selected = 0 };
+        try state.setItemGeometry(2, 1);
+        const header: u16 = if (table) 1 else 0;
+        var storage: tui.render.FixedRendererStorage(6, 10, 8, 4) = .{};
+        var renderer = try tui.render.Renderer.init(storage.slices(), .{ .width = 6, .height = 9 + header });
+        defer renderer.deinit();
+        const selection: tui.theme.Role = .{ .normal = pinnedStyle() };
+        var view = if (table)
+            tui.widget.Table(WrappedProvider){ .provider = &provider, .state = &state, .bounds = .{ .x = 0, .y = 0, .width = 6, .height = 9 + header }, .columns = &.{.{ .title = "N", .width = 6 }}, .selected_role = selection }
+        else
+            tui.widget.List(WrappedProvider){ .provider = &provider, .state = &state, .bounds = .{ .x = 0, .y = 0, .width = 6, .height = 9 }, .selected_role = selection };
+        var surface = renderer.surface(view.bounds);
+        try view.draw(&surface);
+        var scratch: [tui.text.max_grapheme_bytes]u8 = undefined;
+        try testing.expectEqualStrings("b", renderer.desiredCellView(.{ .x = 0, .y = 1 + header }, &scratch).?.glyph);
+        try testing.expect(renderer.desiredCellView(.{ .x = 5, .y = 1 + header }, &scratch).?.style.eql(pinnedStyle()));
+        try testing.expect(!renderer.desiredCellView(.{ .x = 5, .y = 2 + header }, &scratch).?.style.eql(pinnedStyle()));
+        _ = view.handle(.{ .key = .{ .code = .page_down } });
+        try testing.expectEqual(@as(?usize, 2), state.selected);
+        _ = view.handle(.{ .mouse = .{ .x = 0, .y = 2 + header, .button = .left, .action = .press } });
+        try testing.expectEqual(@as(?usize, 2), state.selected);
+        _ = view.handle(.{ .mouse = .{ .x = 0, .y = 4 + header, .button = .left, .action = .press } });
+        try testing.expectEqual(@as(?usize, 1), state.selected);
+        _ = view.handle(.{ .mouse = .{ .x = 0, .y = header, .button = .none, .action = .scroll_down } });
+        try view.draw(&surface);
+        try testing.expectEqual(@as(usize, 1), state.top);
+        state.selected = 5;
+        view.bounds.height = 4 + header;
+        surface = renderer.surface(view.bounds);
+        try view.draw(&surface);
+        try testing.expectEqual(@as(usize, 5), state.top);
+        state.top = 0;
+        state.selected = 0;
+        try view.draw(&surface);
+        try testing.expectEqual(@as(usize, 2), state.visibleRange(provider.count(), 4).end);
+        try testing.expectEqual(@as(u16, 1), state.itemRect(provider.count(), .{ .width = 6, .height = 4 }, 1).?.height);
+        provider.len = 1;
+        state.selected = 5;
+        try view.draw(&surface);
+        try testing.expectEqual(@as(?usize, 0), state.selected);
+        try state.setItemGeometry(8, 0);
+        try view.draw(&surface);
+        try testing.expectEqual(@as(u16, 4), state.itemRect(provider.count(), .{ .width = 6, .height = 4 }, 0).?.height);
+    }
+}
+
+fn pinnedStyle() tui.render.Style {
+    return .{ .attributes = .{ .reverse = true } };
+}

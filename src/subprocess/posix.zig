@@ -1,12 +1,13 @@
 const std = @import("std");
 const render = @import("../render.zig");
+const terminal = @import("../terminal.zig");
 const memory = @import("../core/memory.zig");
 
 extern "c" fn openpty(
     master: *c_int,
     slave: *c_int,
     name: ?[*]u8,
-    termios: ?*const std.posix.termios,
+    termios: ?*const terminal.Termios,
     winsize: ?*const std.posix.winsize,
 ) c_int;
 extern "c" fn fork() std.posix.pid_t;
@@ -542,7 +543,7 @@ fn closeInheritedDescriptors(error_fd: c_int) void {
     const result = std.os.linux.close_range(4, -1, .{ .UNSHARE = false, .CLOEXEC = false });
     const err = std.os.linux.errno(result);
     if (err != .SUCCESS) {
-        std.c._errno().* = @intFromEnum(err);
+        std.c._errno().* = @backingInt(err);
         childFail(error_fd, .close_descriptors);
     }
 }
@@ -555,7 +556,7 @@ fn resetSignalHandlers(error_fd: c_int) void {
     };
     var number: u32 = 1;
     while (number < std.posix.NSIG) : (number += 1) {
-        const signal: std.posix.SIG = @enumFromInt(number);
+        const signal: std.posix.SIG = @fromBackingInt(@intCast(number));
         if (signal == .KILL or signal == .STOP) continue;
         var current: std.posix.Sigaction = undefined;
         switch (std.posix.errno(std.posix.system.sigaction(signal, null, &current))) {
@@ -632,7 +633,7 @@ fn pollPidfdOnce(descriptors: []std.posix.pollfd, timeout: i32) !usize {
 }
 
 fn mapSpawnErrno(errno_value: c_int) anyerror {
-    return switch (@as(std.posix.E, @enumFromInt(errno_value))) {
+    return switch (@as(std.posix.E, @fromBackingInt(@intCast(errno_value)))) {
         .MFILE => error.ProcessFdQuotaExceeded,
         .NFILE => error.SystemFdQuotaExceeded,
         .NOMEM, .NOBUFS => error.SystemResources,
@@ -642,7 +643,7 @@ fn mapSpawnErrno(errno_value: c_int) anyerror {
 
 fn mapChildFailure(failure: ChildFailure) anyerror {
     if (failure.stage != .exec) return error.ChildSetupFailed;
-    return switch (@as(std.posix.E, @enumFromInt(failure.errno_value))) {
+    return switch (@as(std.posix.E, @fromBackingInt(@intCast(failure.errno_value)))) {
         .NOENT => error.FileNotFound,
         .ACCES => error.AccessDenied,
         .NOEXEC => error.InvalidExecutable,

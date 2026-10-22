@@ -6882,12 +6882,12 @@ pub fn graphemeBreak(codepoint: u21) GraphemeBreak {
     if (codepoint >= 0xAC00 and codepoint <= 0xD7A3) {
         return if ((codepoint - 0xAC00) % 28 == 0) .lv else .lvt;
     }
-    return @enumFromInt(lookupProperty(grapheme_break_ranges[0..], codepoint, 0));
+    return @fromBackingInt(@intCast(lookupProperty(grapheme_break_ranges[0..], codepoint, 0)));
 }
 
 pub fn indicConjunct(codepoint: u21) IndicConjunct {
     if (codepoint < 0x300) return .none;
-    return @enumFromInt(lookupProperty(indic_conjunct_ranges[0..], codepoint, 0));
+    return @fromBackingInt(@intCast(lookupProperty(indic_conjunct_ranges[0..], codepoint, 0)));
 }
 
 pub fn eastAsianWidth(codepoint: u21) EastAsianWidth {
@@ -6910,7 +6910,7 @@ pub fn isEmojiPresentation(codepoint: u21) bool {
 pub fn lineBreak(codepoint: u21) LineBreak {
     if (codepoint < ascii_line_break.len) return ascii_line_break[codepoint];
     const explicit = lookupProperty(line_break_ranges[0..], codepoint, 0xFF);
-    if (explicit != 0xFF) return @enumFromInt(explicit);
+    if (explicit != 0xFF) return @fromBackingInt(@intCast(explicit));
     if ((codepoint >= 0x3400 and codepoint <= 0x4DBF) or
         (codepoint >= 0x4E00 and codepoint <= 0x9FFF) or
         (codepoint >= 0xF900 and codepoint <= 0xFAFF) or
@@ -6924,7 +6924,7 @@ pub fn lineBreak(codepoint: u21) LineBreak {
 }
 
 pub fn wordBreak(codepoint: u21) WordBreak {
-    return @enumFromInt(lookupProperty(word_break_ranges[0..], codepoint, 0));
+    return @fromBackingInt(@intCast(lookupProperty(word_break_ranges[0..], codepoint, 0)));
 }
 
 pub fn isCombiningCategory(codepoint: u21) bool {

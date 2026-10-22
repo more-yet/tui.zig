@@ -10,6 +10,43 @@ pub const ScrollState = struct {
     top: usize = 0,
     selected: ?usize = null,
     last_visible_rows: ?u16 = null,
+    item_height: u16 = 1,
+    gap: u16 = 0,
+
+    /// Change geometry through this method. Top and selection remain item indices.
+    pub fn setItemGeometry(self: *ScrollState, item_height: u16, gap: u16) error{InvalidItemHeight}!void {
+        if (item_height == 0) return error.InvalidItemHeight;
+        if (self.item_height == item_height and self.gap == gap) return;
+        self.item_height = item_height;
+        self.gap = gap;
+        self.last_visible_rows = null;
+    }
+
+    fn stride(self: *const ScrollState) u32 {
+        std.debug.assert(self.item_height != 0);
+        return @as(u32, self.item_height) + self.gap;
+    }
+
+    fn fittingItems(self: *const ScrollState, height: u16) u16 {
+        return @intCast(@max(1, (@as(u32, height) + self.gap) / self.stride()));
+    }
+
+    /// Body-local cells, clipped to the viewport. Gaps are not part of an item.
+    pub fn itemRect(self: *const ScrollState, count: usize, body_size: render.Size, index: usize) ?render.Rect {
+        const visible = self.visibleRange(count, body_size.height);
+        if (body_size.width == 0 or index < visible.start or index >= visible.end) return null;
+        const y: u16 = @intCast((index - visible.start) * self.stride());
+        return .{ .x = 0, .y = y, .width = body_size.width, .height = @min(self.item_height, body_size.height - y) };
+    }
+
+    pub fn itemAt(self: *const ScrollState, count: usize, body_size: render.Size, point: render.Point) ?usize {
+        if (point.x >= body_size.width or point.y >= body_size.height) return null;
+        if (point.y % self.stride() >= self.item_height) return null;
+        const visible = self.visibleRange(count, body_size.height);
+        const offset = point.y / self.stride();
+        if (offset >= visible.len()) return null;
+        return visible.start + offset;
+    }
 
     /// Route focused keys here; mouse coordinates must use the same space as bounds.
     /// Use header_rows = 0 for a list, 1 for a table. No drawing or provider is required.
@@ -23,8 +60,9 @@ pub const ScrollState = struct {
 
     /// Call normalize() before drawing; this query does not move selection or scroll position.
     pub fn visibleRange(self: *const ScrollState, count: usize, visible_rows: u16) scroll.Range {
-        const start = @min(self.top, maxTop(count, visible_rows));
-        return .{ .start = start, .end = start + @min(count - start, visible_rows) };
+        const start = @min(self.top, count -| self.fittingItems(visible_rows));
+        const shown = (@as(u32, visible_rows) + self.stride() - 1) / self.stride();
+        return .{ .start = start, .end = start + @min(count - start, shown) };
     }
 
     pub fn normalize(self: *ScrollState, count: usize, visible_rows: u16) void {
@@ -44,7 +82,7 @@ pub const ScrollState = struct {
         if (self.selected) |selected| {
             if (selected >= count) self.selected = count - 1;
         }
-        self.top = @min(self.top, maxTop(count, visible_rows));
+        self.top = @min(self.top, count -| self.fittingItems(visible_rows));
     }
 
     /// After changing selection, call `state.reveal(count, body_height)` and redraw if true.
@@ -55,12 +93,12 @@ pub const ScrollState = struct {
         self.last_visible_rows = visible_rows;
         if (self.selected) |selected| {
             if (visible_rows != 0) {
+                const capacity = self.fittingItems(visible_rows);
                 if (selected < self.top) {
                     self.top = selected;
-                } else if (selected - self.top >= visible_rows) {
-                    self.top = selected - visible_rows + 1;
+                } else if (selected - self.top >= capacity) {
+                    self.top = selected - capacity + 1;
                 }
-                self.top = @min(self.top, maxTop(count, visible_rows));
             }
         }
         return previous_top != self.top or previous_selected != self.selected;
@@ -134,27 +172,21 @@ pub fn List(comptime Provider: type) type {
             const count = self.provider.count();
             self.state.normalize(count, size.height);
             const visible = self.state.visibleRange(count, size.height);
-            var y: u16 = 0;
-            while (y < size.height) : (y += 1) {
-                const index = if (@as(usize, y) < visible.len())
-                    visible.start + y
-                else
-                    null;
+            try surface.fill(render.Rect.fromSize(size), self.row_role.resolve(if (self.enabled) .normal else .disabled));
+            for (visible.start..visible.end) |index| {
+                const rect = self.state.itemRect(count, size, index) orelse continue;
                 const style = rowStyle(
                     self.row_role,
                     self.selected_role,
                     self.enabled,
                     self.focused,
-                    if (index) |row| self.state.selected == row else false,
+                    self.state.selected == index,
                 );
-                _ = try surface.putTextLine(
-                    .{ .x = 0, .y = y },
-                    if (index) |row| self.provider.row(row) else "",
-                    size.width,
-                    style,
-                    self.width_profile,
-                    .{ .overflow = .ellipsis },
-                );
+                if (self.state.item_height == 1) {
+                    _ = try surface.putTextLine(.{ .x = 0, .y = rect.y }, self.provider.row(index), size.width, style, self.width_profile, .{ .overflow = .ellipsis });
+                } else {
+                    _ = try surface.putWrappedText(rect, self.provider.row(index), style, self.width_profile, .{});
+                }
             }
         }
     };
@@ -216,38 +248,33 @@ pub fn Table(comptime Provider: type) type {
                 try surface.fill(.{ .x = columns.x, .y = 0, .width = size.width - columns.x, .height = 1 }, header_style);
             }
 
-            var body_y: u16 = 0;
-            while (body_y < body.height) : (body_y += 1) {
-                const y = body_y + body.y;
-                const index = if (@as(usize, body_y) < visible.len())
-                    visible.start + body_y
-                else
-                    null;
+            try surface.fill(body, self.row_role.resolve(if (self.enabled) .normal else .disabled));
+            for (visible.start..visible.end) |index| {
+                var rect = self.state.itemRect(count, .{ .width = body.width, .height = body.height }, index) orelse continue;
+                rect.y += body.y;
                 const style = rowStyle(
                     self.row_role,
                     self.selected_role,
                     self.enabled,
                     self.focused,
-                    if (index) |row| self.state.selected == row else false,
+                    self.state.selected == index,
                 );
-                if (index) |row| {
-                    columns = ColumnLayout.init(self.columns, size.width);
-                    while (columns.next()) |placement| {
-                        const column = self.columns[placement.index];
+                try surface.fill(rect, style);
+                columns = ColumnLayout.init(self.columns, size.width);
+                while (columns.next()) |placement| {
+                    const column = self.columns[placement.index];
+                    if (self.state.item_height == 1) {
                         _ = try surface.putTextLine(
-                            .{ .x = placement.x, .y = y },
-                            self.provider.cell(row, placement.index),
+                            .{ .x = placement.x, .y = rect.y },
+                            self.provider.cell(index, placement.index),
                             placement.width,
                             style,
                             self.width_profile,
                             column.options,
                         );
+                    } else {
+                        _ = try surface.putWrappedText(.{ .x = placement.x, .y = rect.y, .width = placement.width, .height = rect.height }, self.provider.cell(index, placement.index), style, self.width_profile, .{ .alignment = column.options.alignment });
                     }
-                    if (columns.x < size.width) {
-                        try surface.fill(.{ .x = columns.x, .y = y, .width = size.width - columns.x, .height = 1 }, style);
-                    }
-                } else {
-                    try surface.fill(.{ .x = 0, .y = y, .width = size.width, .height = 1 }, style);
                 }
             }
         }
@@ -276,7 +303,7 @@ fn handleView(
             };
             if (count == 0) return .handled;
             const previous = state.selected;
-            const step: usize = @max(@as(usize, 1), @as(usize, visible_rows) -| 1);
+            const step: usize = @max(@as(usize, 1), @as(usize, state.fittingItems(visible_rows)) -| 1);
             state.selected = switch (direction) {
                 .first => 0,
                 .last => count - 1,
@@ -296,7 +323,7 @@ fn handleView(
                     const previous = state.top;
                     state.top = switch (mouse.action) {
                         .scroll_up => state.top -| 1,
-                        .scroll_down => @min(state.top +| 1, maxTop(count, visible_rows)),
+                        .scroll_down => @min(state.top +| 1, count -| state.fittingItems(visible_rows)),
                         else => unreachable,
                     };
                     return if (state.top == previous) .handled else .redraw;
@@ -305,9 +332,7 @@ fn handleView(
                     if (mouse.button != .left) return .ignored;
                     const local_y = mouse.y - bounds.y;
                     if (local_y < header_rows) return .handled;
-                    const row_offset = local_y - header_rows;
-                    if (@as(usize, row_offset) >= count -| state.top) return .handled;
-                    const selected = state.top + row_offset;
+                    const selected = state.itemAt(count, .{ .width = bounds.width, .height = visible_rows }, .{ .x = mouse.x - bounds.x, .y = local_y - header_rows }) orelse return .handled;
                     if (state.selected == selected) return .handled;
                     state.selected = selected;
                     return .redraw;
@@ -328,10 +353,4 @@ fn rowStyle(
 ) render.Style {
     if (!selected) return role.resolve(if (enabled) .normal else .disabled);
     return selected_role.resolve(theme.State.from(enabled, focused));
-}
-
-fn maxTop(count: usize, visible_rows: u16) usize {
-    if (count == 0) return 0;
-    if (visible_rows == 0) return count - 1;
-    return count -| visible_rows;
 }

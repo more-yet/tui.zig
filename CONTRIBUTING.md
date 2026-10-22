@@ -3,7 +3,7 @@
 Send security reports through the private process in
 [`SECURITY.md`](SECURITY.md).
 
-Use Zig `0.16.0`. Keep each change focused. Follow the ownership and capacity
+Use Zig `0.17.0`. Keep each change focused. Follow the ownership and capacity
 rules of the code you change.
 
 Keep tests focused on observable runtime contracts: fragmented I/O, state

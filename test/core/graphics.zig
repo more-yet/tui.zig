@@ -30,6 +30,7 @@ test "graphics chunk bounds padding and acknowledged suffixes round trip" {
             if (offset != 0 and !more) try testing.expect(std.mem.indexOf(u8, output[0..separator], "m=0") != null);
             var saved: [Sender.output_capacity]u8 = undefined;
             @memcpy(saved[0..output.len], output);
+            try testing.expectError(error.TransferActive, sender.secureDeinit());
             try testing.expectError(error.InvalidByteCount, sender.consumeOutput(output.len + 1));
             try sender.consumeOutput(0);
             try testing.expectEqualSlices(u8, saved[0..output.len], (try sender.outputStep()).?);
@@ -40,5 +41,8 @@ test "graphics chunk bounds padding and acknowledged suffixes round trip" {
         }
         try testing.expectEqual(length, offset);
         try testing.expect(!sender.isActive());
+        try sender.secureDeinit();
+        try testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&sender), 0));
+        for (source[0..length], 0..) |byte, index| try testing.expectEqual(@as(u8, @truncate(index)), byte);
     }
 }

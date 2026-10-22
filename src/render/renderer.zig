@@ -1756,7 +1756,7 @@ pub const Surface = struct {
         text: []const u8,
         style: style_module.Style,
         width_profile: grapheme.WidthProfile,
-        alignment: line_layout.Alignment,
+        options: text_wrap.Options,
     ) !u16 {
         try self.renderer.requireInactive();
         if (rect.width == 0 or rect.height == 0) return 0;
@@ -1766,6 +1766,7 @@ pub const Surface = struct {
         const visible_lines = @min(rect.height, paragraph.clip.height);
         var y: u16 = 0;
         var lines = try text_wrap.Iterator.init(text, rect.width, width_profile);
+        _ = try lines.skipRows(options.first_row);
         const direct_ascii = lines.asciiOnly() and paragraph.clip.width == rect.width;
         const style_id = if (direct_ascii) try self.renderer.styles.intern(style) else 0;
         defer if (direct_ascii) self.renderer.styles.release(style_id);
@@ -1778,7 +1779,7 @@ pub const Surface = struct {
                 rect.width,
                 style,
                 width_profile,
-                alignment,
+                options.alignment,
                 direct_ascii,
                 style_id,
             );
@@ -1800,7 +1801,7 @@ pub const Surface = struct {
         spans: []const StyledSpan,
         base_style: style_module.Style,
         width_profile: grapheme.WidthProfile,
-        alignment: line_layout.Alignment,
+        options: text_wrap.Options,
     ) !u16 {
         try self.renderer.requireInactive();
         if (rect.width == 0 or rect.height == 0) return 0;
@@ -1808,12 +1809,13 @@ pub const Surface = struct {
         if (paragraph.clip.isEmpty()) return 0;
 
         var lines = try text_wrap.SpanIterator(StyledSpan).init(spans, rect.width, width_profile);
+        _ = try lines.skipRows(options.first_row);
         const visible_lines = @min(rect.height, paragraph.clip.height);
         const direct_ascii = lines.asciiOnly() and paragraph.clip.width == rect.width;
         var y: u16 = 0;
         while (y < visible_lines) : (y += 1) {
             const line = try lines.next() orelse break;
-            const offset = switch (alignment) {
+            const offset = switch (options.alignment) {
                 .left => 0,
                 .center => (rect.width - line.width) / 2,
                 .right => rect.width - line.width,

@@ -91,11 +91,11 @@ fn denyCloseRange(err: std.posix.E) !void {
     const bpf = linux.BPF;
     const instructions = [_]Instruction{
         .{ .code = bpf.LD | bpf.W | bpf.ABS, .k = @offsetOf(linux.SECCOMP.data, "nr") },
-        .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jf = 1, .k = @intFromEnum(linux.SYS.close_range) },
-        .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(err)) },
+        .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jf = 1, .k = @backingInt(linux.SYS.close_range) },
+        .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(err)) },
         .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ALLOW },
     };
     const program = Program{ .len = instructions.len, .filter = &instructions };
-    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS or
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS or
         linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return error.SeccompUnavailable;
 }

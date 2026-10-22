@@ -54,10 +54,11 @@ test "text input caret geometry matches painting without losing focus styling" {
 }
 
 test "accepted and rejected pastes cannot become commands across read splits" {
+    const repeated_z: [300]u8 = @splat('z');
     const cases = [_]struct { bytes: []const u8, value: []const u8, failure: ?tui.editor.EditError }{
         .{ .bytes = "\x1b[200~zzzj\x1b[201~x", .value = "zzzjx", .failure = null },
         .{ .bytes = "\x1b[200~zzzj\r\x1b[201~x", .value = "x", .failure = error.InvalidText },
-        .{ .bytes = "\x1b[200~" ++ ("z" ** 300) ++ "j\r\x1b[201~x", .value = "x", .failure = error.PasteCapacityExceeded },
+        .{ .bytes = "\x1b[200~" ++ repeated_z ++ "j\r\x1b[201~x", .value = "x", .failure = error.PasteCapacityExceeded },
     };
     for (cases) |case| {
         for (0..case.bytes.len + 1) |split| {

@@ -4,8 +4,9 @@
 zig build test-terminal -Dterminal-tests=true --test-timeout 60s -j2
 ```
 
-Tests feed library output directly into the pinned `ghostty-vt` terminal engine.
-The dependency is test-only; the public module does not depend on it.
+Tests feed library output directly into the `ghostty-vt` terminal engine from a
+pinned Ghostty prerelease. It is used only for tests; the public library has no
+dependency on it.
 
 - `render.zig`: fragmented UTF-8/VT output, styles, wide-cell repair, cursor
   placement, resize, capability replies, and normal/emergency restoration on private PTYs.

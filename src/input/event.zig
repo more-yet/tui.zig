@@ -1,3 +1,6 @@
+const std = @import("std");
+const memory = @import("../core/memory.zig");
+
 pub const Modifiers = packed struct(u8) {
     shift: bool = false,
     alt: bool = false,
@@ -43,6 +46,9 @@ pub const Key = struct {
     code: KeyCode,
     modifiers: Modifiers = .{},
     action: KeyAction = .press,
+    shifted_codepoint: ?u21 = null,
+    base_layout_codepoint: ?u21 = null,
+    text: []const u8 = &.{},
 };
 
 pub const MouseButton = enum {
@@ -111,6 +117,7 @@ pub fn OwnedEvent(comptime max_payload_bytes: usize) type {
         pub fn init(value: Event) OwnedEventError!Self {
             var result = Self{ .metadata = value };
             const bytes = switch (value) {
+                .key => |key| key.text,
                 .text, .paste_chunk => |payload| payload,
                 .terminal_reply => |reply| reply.raw,
                 else => return result,
@@ -118,31 +125,32 @@ pub fn OwnedEvent(comptime max_payload_bytes: usize) type {
             if (bytes.len > max_payload_bytes) return error.PayloadTooLarge;
             @memcpy(result.payload[0..bytes.len], bytes);
             result.payload_len = bytes.len;
-            result.metadata = switch (value) {
-                .text => .{ .text = &.{} },
-                .paste_chunk => .{ .paste_chunk = &.{} },
-                .terminal_reply => |reply| .{ .terminal_reply = .{
-                    .kind = reply.kind,
-                    .final = reply.final,
-                    .raw = &.{},
-                } },
+            switch (result.metadata) {
+                .key => result.metadata.key.text = &.{},
+                .text => result.metadata.text = &.{},
+                .paste_chunk => result.metadata.paste_chunk = &.{},
+                .terminal_reply => result.metadata.terminal_reply.raw = &.{},
                 else => unreachable,
-            };
+            }
             return result;
         }
 
         /// Keep this value unmoved and unchanged while using the returned event.
         pub fn borrow(self: *const Self) Event {
-            return switch (self.metadata) {
-                .text => .{ .text = self.payload[0..self.payload_len] },
-                .paste_chunk => .{ .paste_chunk = self.payload[0..self.payload_len] },
-                .terminal_reply => |reply| .{ .terminal_reply = .{
-                    .kind = reply.kind,
-                    .final = reply.final,
-                    .raw = self.payload[0..self.payload_len],
-                } },
-                else => self.metadata,
-            };
+            var result = self.metadata;
+            switch (result) {
+                .key => result.key.text = self.payload[0..self.payload_len],
+                .text => result.text = self.payload[0..self.payload_len],
+                .paste_chunk => result.paste_chunk = self.payload[0..self.payload_len],
+                .terminal_reply => result.terminal_reply.raw = self.payload[0..self.payload_len],
+                else => {},
+            }
+            return result;
+        }
+
+        /// Expires all borrowed payloads. Reinitialize before reuse.
+        pub fn secureDeinit(self: *Self) void {
+            memory.secureZero(std.mem.asBytes(self));
         }
     };
 }

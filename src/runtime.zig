@@ -11,7 +11,6 @@ pub const PollSlot = posix.PollSlot;
 pub const PollSource = posix.PollSource;
 pub const ReadyEvent = posix.ReadyEvent;
 pub const requiredPollSlots = posix.requiredPollSlots;
-pub const ResizeSource = posix.ResizeSource;
 pub const Signal = posix.Signal;
 pub const SignalOptions = posix.SignalOptions;
 pub const SignalSource = posix.SignalSource;

@@ -18,3 +18,4 @@ pub const layoutLine = @import("text/line.zig").layout;
 pub const WrapIterator = @import("text/wrap.zig").Iterator;
 pub const WrappedLine = @import("text/wrap.zig").Line;
 pub const WrapError = @import("text/wrap.zig").Error;
+pub const WrapOptions = @import("text/wrap.zig").Options;

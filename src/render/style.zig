@@ -181,7 +181,7 @@ fn colorEql(lhs: Color, rhs: Color) bool {
 }
 
 fn encodeColor(color: Color, output: []u8) void {
-    output[0] = @intFromEnum(std.meta.activeTag(color));
+    output[0] = @backingInt(std.meta.activeTag(color));
     switch (color) {
         .default => {},
         .indexed => |value| output[1] = value,
