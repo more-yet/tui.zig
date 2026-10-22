@@ -250,7 +250,7 @@ pub fn encodeControl(output: []u8, command: Command, context: EncodeContext) Enc
         if (tx.medium != .direct) return error.InvalidCommand;
         if (command == .animation_frame) try builder.action('f');
         try builder.fieldUnsigned('m', @intFromBool(context.more_chunks));
-        if (context.response != .all) try builder.fieldUnsigned('q', @intFromEnum(context.response));
+        if (context.response != .all) try builder.fieldUnsigned('q', @backingInt(context.response));
         return builder.written();
     }
 
@@ -285,13 +285,13 @@ pub fn encodeControl(output: []u8, command: Command, context: EncodeContext) Enc
             try builder.optionalUnsigned('c', value.base_frame);
             try builder.optionalUnsigned('r', value.edit_frame);
             try builder.optionalSigned('z', value.gap_ms);
-            try builder.fieldUnsigned('X', @intFromEnum(value.composition));
+            try builder.fieldUnsigned('X', @backingInt(value.composition));
             try builder.optionalUnsigned('Y', value.background_rgba);
         },
         .animation_control => |value| {
             try builder.action('a');
             try builder.identifiers(value.identifiers);
-            if (value.state) |state| try builder.fieldUnsigned('s', @intFromEnum(state));
+            if (value.state) |state| try builder.fieldUnsigned('s', @backingInt(state));
             try builder.optionalUnsigned('r', value.frame);
             try builder.optionalSigned('z', value.gap_ms);
             try builder.optionalUnsigned('c', value.current_frame);
@@ -308,10 +308,10 @@ pub fn encodeControl(output: []u8, command: Command, context: EncodeContext) Enc
             try builder.optionalUnsigned('h', value.height_pixels);
             try builder.optionalUnsigned('X', value.source_x_pixels);
             try builder.optionalUnsigned('Y', value.source_y_pixels);
-            try builder.fieldUnsigned('C', @intFromEnum(value.composition));
+            try builder.fieldUnsigned('C', @backingInt(value.composition));
         },
     }
-    if (context.response != .all) try builder.fieldUnsigned('q', @intFromEnum(context.response));
+    if (context.response != .all) try builder.fieldUnsigned('q', @backingInt(context.response));
     return builder.written();
 }
 
@@ -374,8 +374,8 @@ const Builder = struct {
     }
 
     fn transmission(self: *Builder, value: Transmission, more_chunks: bool) EncodeError!void {
-        try self.fieldUnsigned('f', @intFromEnum(value.format));
-        try self.fieldChar('t', @intFromEnum(value.medium));
+        try self.fieldUnsigned('f', @backingInt(value.format));
+        try self.fieldChar('t', @backingInt(value.medium));
         try self.optionalUnsigned('s', value.width_pixels);
         try self.optionalUnsigned('v', value.height_pixels);
         try self.optionalUnsigned('S', value.data_size_bytes);

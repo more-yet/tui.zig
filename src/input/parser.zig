@@ -1,5 +1,6 @@
 const std = @import("std");
 const event = @import("event.zig");
+const memory = @import("../core/memory.zig");
 
 const paste_end = "\x1b[201~";
 
@@ -134,6 +135,13 @@ pub const Parser = struct {
         self.resetState();
         self.pending_index = 0;
         self.pending_len = 0;
+    }
+
+    /// End event borrows first. Drain framing and queued outcomes before disposal;
+    /// this is not a cancellation operation. Reinitialize before reuse.
+    pub fn secureDeinit(self: *Parser) error{PendingInput}!void {
+        if (self.pending() != .none or self.hasQueuedEvent()) return error.PendingInput;
+        memory.secureZero(std.mem.asBytes(self));
     }
 
     fn resetState(self: *Parser) void {
@@ -632,11 +640,12 @@ pub const Parser = struct {
 
     fn dispatchKitty(self: *Parser, parameters: []const u8) void {
         var fields = std.mem.splitScalar(u8, parameters, ';');
-        const codepoint = parseKittyKeyField(fields.next() orelse "") orelse {
+        const keys = parseKittyKeyField(fields.next() orelse "") orelse {
             self.emit(.malformed);
             return;
         };
         const modifier_and_action = fields.next();
+        const text_field = fields.next();
         if (fields.next() != null) {
             self.emit(.malformed);
             return;
@@ -645,10 +654,41 @@ pub const Parser = struct {
             self.emit(.malformed);
             return;
         };
+        if (keys.shifted != null and !metadata.modifiers.shift) {
+            self.emit(.malformed);
+            return;
+        }
+        var text: [max_event_payload_bytes]u8 = undefined;
+        var text_len: usize = 0;
+        if (text_field) |field| {
+            var codepoints = std.mem.splitScalar(u8, field, ':');
+            while (field.len != 0) {
+                const value = codepoints.next() orelse break;
+                const scalar = parseUnicodeScalar(value) orelse {
+                    self.emit(.malformed);
+                    return;
+                };
+                if (scalar < 0x20 or (scalar >= 0x7f and scalar <= 0x9f)) {
+                    self.emit(.malformed);
+                    return;
+                }
+                var encoded: [4]u8 = undefined;
+                const length = std.unicode.utf8Encode(scalar, &encoded) catch unreachable;
+                if (length > text.len - text_len) {
+                    self.emit(.malformed);
+                    return;
+                }
+                @memcpy(text[text_len..][0..length], encoded[0..length]);
+                text_len += length;
+            }
+        }
         self.emit(.{ .key = .{
-            .code = kittyKeyCode(codepoint),
+            .code = kittyKeyCode(keys.primary),
             .modifiers = metadata.modifiers,
             .action = metadata.action,
+            .shifted_codepoint = keys.shifted,
+            .base_layout_codepoint = keys.base,
+            .text = text[0..text_len],
         } });
     }
 
@@ -805,16 +845,20 @@ fn keyMetadata(field: ?[]const u8) ?KeyMetadata {
     return .{ .modifiers = modifiers, .action = action };
 }
 
-fn parseKittyKeyField(value: []const u8) ?u21 {
+const KittyKeys = struct { primary: u21, shifted: ?u21 = null, base: ?u21 = null };
+
+fn parseKittyKeyField(value: []const u8) ?KittyKeys {
     var keys = std.mem.splitScalar(u8, value, ':');
     const primary = parseUnicodeScalar(keys.next() orelse return null) orelse return null;
-    var optional_count: u2 = 0;
-    while (keys.next()) |alternate| {
-        if (optional_count == 2) return null;
-        optional_count += 1;
-        if (alternate.len != 0 and parseUnicodeScalar(alternate) == null) return null;
-    }
-    return primary;
+    var result = KittyKeys{ .primary = primary };
+    if (keys.next()) |shifted| if (shifted.len != 0) {
+        result.shifted = parseUnicodeScalar(shifted) orelse return null;
+    };
+    if (keys.next()) |base| if (base.len != 0) {
+        result.base = parseUnicodeScalar(base) orelse return null;
+    };
+    if (keys.next() != null) return null;
+    return result;
 }
 
 fn parseUnicodeScalar(value: []const u8) ?u21 {

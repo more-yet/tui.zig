@@ -38,9 +38,9 @@ pub const Stroke = struct {
             else => 0,
         };
         return payload |
-            (@as(u64, @intFromEnum(tag)) << 21) |
+            (@as(u64, @backingInt(tag)) << 21) |
             (@as(u64, @as(u8, @bitCast(self.modifiers))) << 32) |
-            (@as(u64, @intFromEnum(self.action)) << 40);
+            (@as(u64, @backingInt(self.action)) << 40);
     }
 };
 

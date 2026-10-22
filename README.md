@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/more-yet/tui.zig/actions/workflows/ci.yml/badge.svg)](https://github.com/more-yet/tui.zig/actions/workflows/ci.yml)
 
-Terminal UI primitives for **Zig 0.16.0**, **x86_64-linux-gnu**, and **Linux 5.9+**.
+Terminal UI primitives for **Zig 0.17.0**, **x86_64-linux-gnu**, and **Linux 5.9+**.
 Unicode data is version **17.0.0**. The public module has no package dependencies.
 
 The library provides text layout, incremental rendering, input parsing, widgets,
@@ -96,6 +96,11 @@ resource ownership, and replay.
 
 ### Input and terminal lifecycle
 
+- `terminal.queryGeometry(file)` returns `.cells` and optional `.pixels`. Runtime
+  resize events carry this geometry and are also remeasurement hints: unchanged
+  cell dimensions do not suppress a request. Multiple pending requests coalesce.
+  Use `.cells` for renderer layout; pixel dimensions are null when unavailable.
+  Set `runtime.Options.resize` directly to the borrowed `std.Io.File` to query.
 - Use nonblocking terminal input/output. `runtime.Posix` validates both file flags
   and kernel `O_NONBLOCK` for input and caller poll sources.
 - Use `stepWithSources()` when idle; use `pollWithSources()` to interleave runnable
@@ -109,10 +114,55 @@ resource ownership, and replay.
   terminator. Reset the parser only when abandoning the old byte stream.
 - Install `SignalSource` before workers. Leave the terminal session before
   `suspendProcess()`; re-enter and invalidate the renderer after continuation.
+  Suspend/continue cancels incomplete input through `.input_failure`, preserving
+  paste framing. Pass the rejection to an active editor as `.malformed`.
 - Keep runtime at a fixed address while sharing notifiers. Publish shared state
   before waking; join notifier users before deinitializing runtime.
 - Finish visual leave output and restore termios separately. Use
   `Session.emergencyRestore()` for bounded last-resort restoration after failure.
+
+Select Kitty keyboard enhancements explicitly:
+
+```zig
+const keyboard: tui.terminal.KeyboardEnhancements = .{
+    .event_types = true,
+    .all_keys = true,
+    .associated_text = true,
+    .alternate_keys = true,
+};
+```
+
+Set `SessionOptions.kitty_keyboard = keyboard` or call
+`session.beginKittyKeyboard(keyboard)` after negotiation. Null leaves/disables
+the session-owned stack frame. Reconfiguration pops that frame before pushing
+its replacement; drain output normally. Associated text requires all-key reporting.
+Enter/Tab/Backspace release events require event types and all-key reporting.
+Terminals without these reports cannot distinguish held-key repeats reliably.
+
+`input.Key` keeps primary identity in `code`, alternates in `shifted_codepoint`
+and `base_layout_codepoint`, and generated UTF-8 in borrowed `text`. One report
+produces one event. Editors prefer associated text on press/repeat and ignore
+release text. Shortcuts remain matched against primary identity unless the caller
+explicitly chooses an alternate. Copy retained events with `OwnedEvent`.
+
+### Sensitive storage
+
+Use explicit erasure after all borrows end:
+
+- `Model.secureDeinit()` erases full text/index/row/paste capacities; finish or
+  cancel staged paste first. Separately owned history is not erased.
+- `History.secureClear()` and `InputHistory.secureClear()` erase full backing
+  capacities and remain reusable. They require exclusive access.
+- `Parser.secureDeinit()` refuses incomplete framing or queued outcomes.
+- `Posix.secureDeinit()` refuses local input work and incomplete framing. Join
+  notifier users first. It closes owned resources and erases its read buffer,
+  but not timers, SignalSource, or kernel-queued input.
+- `OwnedEvent.secureDeinit()` ends borrowed payload lifetimes and wipes the object.
+- `Sender.secureDeinit()` requires idle output and erases only the sender.
+
+Deinitialized objects must be initialized again before use. Erase other owned
+buffers with `tui.secureZero(bytes)`. These operations neither erase terminal
+history nor guarantee removal of external copies, registers, or swapped pages.
 
 ### Child processes
 
@@ -142,6 +192,12 @@ Keep one scroll state per independently scrolled view.
   keyboard, wheel, and row-click navigation without constructing a List or Table.
   Pass 0 header rows for lists and 1 for tables. Before custom drawing, call
   `normalize(count, body_height)`, then iterate `visibleRange(count, body_height)`.
+- **Item geometry:** `try state.setItemGeometry(2, 1)` selects two-row items with
+  one-row gaps. Top and selection remain item indices. `itemRect()` and `itemAt()`
+  use body-local coordinates; gaps are not clickable. Default drawing wraps taller
+  items and includes partially visible items. Navigation reveals a fully fitting
+  selection, or top-aligns an item taller than the viewport. Keep scrollbar metrics
+  in consistent units rather than mixing item indices and physical rows.
 - **Logs:** `scroll.Viewport` provides scrolling, tail-following, and
   `visibleRange()`. It remains separate from selectable-row state.
 - **Layout:** List, Table, and Scrollback use their declared `bounds` for layout
@@ -162,6 +218,13 @@ try surface.fillAscii(.{ .x = 0, .y = 0, .width = filled, .height = 1 }, '=', .{
 Default List/Table providers supply plain text. For per-cell styles or mixed
 content, draw directly using the same state, visible range, and column layout.
 No renderer callbacks or alternate state objects are needed.
+
+For borrowed read-only text, use `Paragraph.rowCount(width)` and set
+`Paragraph.first_row` before drawing. Both surface wrapping methods accept
+`.{ .first_row = top, .alignment = .left }`. Public wrapping iterators also provide
+`skipRows(n)` and `countRemaining()`; counting leaves the iterator unchanged.
+They use the same wrapping engine, validate all input, and traverse skipped prefixes
+without allocating an index. An offset beyond the content clears the viewport.
 
 `focus.Registry` borrows a caller-owned `[]focus.Target` for registration and
 hit-testing. `focus.Manager` selects the active ID. Dispatch events directly to

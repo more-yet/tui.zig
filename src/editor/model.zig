@@ -221,6 +221,17 @@ pub const Model = struct {
         return self.storage[0..self.len];
     }
 
+    /// Ends all model borrows and erases full storage capacities. Separately owned
+    /// history is not erased. Finish/cancel staged paste first; reinitialize to reuse.
+    pub fn secureDeinit(self: *Model) error{PasteActive}!void {
+        if (self.paste_state != .idle) return error.PasteActive;
+        memory.secureZero(self.storage);
+        memory.secureZero(std.mem.sliceAsBytes(self.boundaries));
+        memory.secureZero(std.mem.sliceAsBytes(self.visual_row_storage));
+        memory.secureZero(self.paste_storage);
+        memory.secureZero(std.mem.asBytes(self));
+    }
+
     fn rebuildBoundaries(self: *Model) void {
         var iterator = grapheme.Iterator{ .input = self.value() };
         var count: usize = 0;

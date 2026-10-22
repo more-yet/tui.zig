@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     const unicode_generator_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const unicode_generator = b.addExecutable(.{
         .name = "gen-unicode",
@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .@"emit-lib-vt" = true,
+            .@"emit-themes" = false,
             .@"app-runtime" = .none,
             .simd = false,
             .@"vt-features" = "-all,+formatter,+kitty-graphics",
@@ -133,14 +134,14 @@ pub fn build(b: *std.Build) void {
     const benchmark_tui = b.createModule(.{
         .root_source_file = b.path("src/tui.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .link_libc = true,
     });
     benchmark_tui.linkSystemLibrary("util", .{});
     const benchmark_module = b.createModule(.{
         .root_source_file = b.path("bench/base.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     benchmark_module.addImport("tui", benchmark_tui);
     const benchmark = b.addExecutable(.{
@@ -148,7 +149,7 @@ pub fn build(b: *std.Build) void {
         .root_module = benchmark_module,
     });
     const benchmark_run = b.addRunArtifact(benchmark);
-    if (b.args) |args| benchmark_run.addArgs(args);
+    benchmark_run.addPassthruArgs();
     const benchmark_step = b.step("bench", "Run the ReleaseFast baseline benchmark");
     benchmark_step.dependOn(&benchmark_run.step);
 }

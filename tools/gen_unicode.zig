@@ -264,7 +264,7 @@ fn parseGcb(allocator: std.mem.Allocator, data: []const u8, output: *std.ArrayLi
             return error.UnknownGraphemeBreakProperty;
 
         const range = try parseRange(codepoints);
-        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @intFromEnum(value) });
+        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @backingInt(value) });
     }
 }
 
@@ -291,7 +291,7 @@ fn parseIncb(allocator: std.mem.Allocator, data: []const u8, output: *std.ArrayL
             return error.UnknownIndicConjunctProperty;
 
         const range = try parseRange(codepoints);
-        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @intFromEnum(value) });
+        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @backingInt(value) });
     }
 }
 
@@ -362,7 +362,7 @@ fn parseLineBreak(allocator: std.mem.Allocator, data: []const u8, output: *std.A
             return error.UnknownLineBreakProperty;
         };
         const range = try parseRange(codepoints);
-        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @intFromEnum(value) });
+        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @backingInt(value) });
     }
 }
 
@@ -414,7 +414,7 @@ fn parseWordBreak(allocator: std.mem.Allocator, data: []const u8, output: *std.A
         else
             return error.UnknownWordBreakProperty;
         const range = try parseRange(codepoints);
-        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @intFromEnum(value) });
+        try output.append(allocator, .{ .first = range.first, .last = range.last, .value = @backingInt(value) });
     }
 }
 
@@ -646,12 +646,12 @@ fn emit(
         \\    if (codepoint >= 0xAC00 and codepoint <= 0xD7A3) {
         \\        return if ((codepoint - 0xAC00) % 28 == 0) .lv else .lvt;
         \\    }
-        \\    return @enumFromInt(lookupProperty(grapheme_break_ranges[0..], codepoint, 0));
+        \\    return @fromBackingInt(@intCast(lookupProperty(grapheme_break_ranges[0..], codepoint, 0)));
         \\}
         \\
         \\pub fn indicConjunct(codepoint: u21) IndicConjunct {
         \\    if (codepoint < 0x300) return .none;
-        \\    return @enumFromInt(lookupProperty(indic_conjunct_ranges[0..], codepoint, 0));
+        \\    return @fromBackingInt(@intCast(lookupProperty(indic_conjunct_ranges[0..], codepoint, 0)));
         \\}
         \\
         \\pub fn eastAsianWidth(codepoint: u21) EastAsianWidth {
@@ -674,7 +674,7 @@ fn emit(
         \\pub fn lineBreak(codepoint: u21) LineBreak {
         \\    if (codepoint < ascii_line_break.len) return ascii_line_break[codepoint];
         \\    const explicit = lookupProperty(line_break_ranges[0..], codepoint, 0xFF);
-        \\    if (explicit != 0xFF) return @enumFromInt(explicit);
+        \\    if (explicit != 0xFF) return @fromBackingInt(@intCast(explicit));
         \\    if ((codepoint >= 0x3400 and codepoint <= 0x4DBF) or
         \\        (codepoint >= 0x4E00 and codepoint <= 0x9FFF) or
         \\        (codepoint >= 0xF900 and codepoint <= 0xFAFF) or
@@ -688,7 +688,7 @@ fn emit(
         \\}
         \\
         \\pub fn wordBreak(codepoint: u21) WordBreak {
-        \\    return @enumFromInt(lookupProperty(word_break_ranges[0..], codepoint, 0));
+        \\    return @fromBackingInt(@intCast(lookupProperty(word_break_ranges[0..], codepoint, 0)));
         \\}
         \\
         \\pub fn isCombiningCategory(codepoint: u21) bool {
@@ -752,7 +752,7 @@ fn emitAsciiLineBreak(writer: *std.Io.Writer, ranges: []const Range) !void {
     try writer.writeAll("const ascii_line_break = [128]LineBreak{\n");
     for (0..128) |codepoint| {
         if (codepoint % 8 == 0) try writer.writeAll("    ");
-        const value: Lb = @enumFromInt(propertyAt(ranges, @intCast(codepoint), @intFromEnum(Lb.xx)));
+        const value: Lb = @fromBackingInt(@intCast(propertyAt(ranges, @intCast(codepoint), @backingInt(Lb.xx))));
         try writer.print(".{s},", .{@tagName(value)});
         try writer.writeByte(if (codepoint % 8 == 7) '\n' else ' ');
     }

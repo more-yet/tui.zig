@@ -31,6 +31,8 @@ test "one-row single-line storage supports Unicode edits paste and history witho
     try testing.expectEqual(error.InvalidText, model.handle(.{ .text = "\n" }).failure.?);
 
     _ = model.handle(.paste_start);
+    try testing.expectError(error.PasteActive, model.secureDeinit());
+    try testing.expectEqualStrings("a\u{754c}e\u{301}", model.value());
     _ = model.handle(.{ .paste_chunk = "!" });
     try expectSuccessfulRedraw(model.handle(.paste_end));
     try testing.expect(try model.undo());
@@ -60,6 +62,43 @@ test "one-row single-line storage supports Unicode edits paste and history witho
     try testing.expectEqual(@as(usize, 4), wrapped.visual_row_count);
     try testing.expect(try wrapped.setSoftWrap(false));
     try testing.expectEqual(@as(usize, 1), wrapped.visual_row_count);
+
+    try model.secureDeinit();
+    try testing.expect(std.mem.allEqual(u8, &text, 0));
+    try testing.expect(std.mem.allEqual(u8, &paste, 0));
+    try testing.expect(std.mem.allEqual(u8, std.mem.sliceAsBytes(&boundaries), 0));
+    try testing.expect(std.mem.allEqual(u8, std.mem.sliceAsBytes(&rows), 0));
+    try testing.expect(!std.mem.allEqual(u8, &history_bytes, 0));
+    history.secureClear();
+    try testing.expect(std.mem.allEqual(u8, &history_bytes, 0));
+    try testing.expect(std.mem.allEqual(u8, std.mem.sliceAsBytes(&records), 0));
+}
+
+test "keyboard text honors associated Unicode and shifted identities but ignores releases" {
+    var storage: tui.editor.FixedStorage(64) = .{};
+    var model = try tui.editor.Model.initSingleLine(storage.slices(), "");
+    const text_key: tui.input.Key = .{ .code = .{ .codepoint = 'e' }, .text = "\u{e9}", .modifiers = .{ .control = true, .alt = true } };
+    try expectSuccessfulRedraw(model.handle(.{ .key = text_key }));
+    var repeated = text_key;
+    repeated.action = .repeat;
+    try expectSuccessfulRedraw(model.handle(.{ .key = repeated }));
+    repeated.action = .release;
+    try testing.expectEqual(tui.editor.EventStatus.ignored, model.handle(.{ .key = repeated }).status);
+    try expectSuccessfulRedraw(model.handle(.{ .key = .{ .code = .{ .codepoint = 'a' }, .modifiers = .{ .shift = true }, .shifted_codepoint = 'A', .base_layout_codepoint = 'q' } }));
+    try testing.expectEqualStrings("\u{e9}\u{e9}A", model.value());
+
+    var entries: [4]tui.editor.InputHistoryEntry = undefined;
+    var bytes: [64]u8 = @splat(0xaa);
+    var draft: [64]u8 = @splat(0xaa);
+    var history = try tui.editor.InputHistory.init(&entries, &bytes, &draft);
+    _ = try history.push(model.value());
+    _ = try history.previous("draft");
+    try testing.expectEqualStrings("draft", history.next().?);
+    history.secureClear();
+    try testing.expect(std.mem.allEqual(u8, &bytes, 0));
+    try testing.expect(std.mem.allEqual(u8, &draft, 0));
+    try testing.expect(std.mem.allEqual(u8, std.mem.sliceAsBytes(&entries), 0));
+    try testing.expect(try history.push("new"));
 }
 
 fn expectSuccessfulRedraw(result: tui.editor.EventResult) !void {

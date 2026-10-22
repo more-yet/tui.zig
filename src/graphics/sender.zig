@@ -1,5 +1,6 @@
 const std = @import("std");
 const kitty = @import("kitty.zig");
+const memory = @import("../core/memory.zig");
 
 pub const Limits = struct {
     max_payload_bytes: usize = 64 * 1024 * 1024,
@@ -58,6 +59,13 @@ pub const Sender = struct {
 
     pub fn isActive(self: *const Sender) bool {
         return self.state != .idle;
+    }
+
+    /// Finish all output and end borrows first. Erases this sender only, not source
+    /// bytes or terminal images. Reinitialize before reuse.
+    pub fn secureDeinit(self: *Sender) error{TransferActive}!void {
+        if (self.isActive()) return error.TransferActive;
+        memory.secureZero(std.mem.asBytes(self));
     }
 
     /// Keep `data` alive and unchanged until completion, including cancellation output.

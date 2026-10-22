@@ -228,7 +228,7 @@ inline fn ownedEventIteration(
     };
     std.mem.doNotOptimizeAway(&owned);
     return switch (owned.borrow()) {
-        .key => |key| @intFromEnum(std.meta.activeTag(key.code)),
+        .key => |key| @backingInt(std.meta.activeTag(key.code)),
         .paste_chunk => |bytes| bytes[0] + bytes[bytes.len - 1],
         else => unreachable,
     };
@@ -399,7 +399,7 @@ fn runtimeTimerBatch(
         var deadline = base;
         deadline.raw.nanoseconds += @as(i96, @intCast(1 + (iteration * 17) % 64)) * std.time.ns_per_s;
         const change = runtime.setTimer(id, deadline) catch unreachable;
-        checksum.* +%= @intFromEnum(change);
+        checksum.* +%= @backingInt(change);
     }
 }
 
@@ -782,7 +782,7 @@ fn lineBreakIteration(text: []const u8) !u64 {
     var iterator = try tui.text.LineBreakIterator.init(text);
     var checksum: u64 = 0;
     while (iterator.next()) |boundary| {
-        checksum +%= boundary.offset + @intFromEnum(boundary.kind);
+        checksum +%= boundary.offset + @backingInt(boundary.kind);
     }
     return checksum;
 }
@@ -1318,7 +1318,7 @@ fn renderIteration(
                 .focused = .{ .foreground = .{ .indexed = 15 }, .attributes = .{ .bold = true } },
                 .disabled = .{ .foreground = .{ .indexed = 8 }, .attributes = .{ .dim = true } },
             };
-            const state: tui.theme.State = @enumFromInt(iteration % 3);
+            const state: tui.theme.State = @fromBackingInt(@intCast(iteration % 3));
             const style = role.resolve(state);
             std.mem.doNotOptimizeAway(style);
         },
@@ -1599,7 +1599,7 @@ fn renderIteration(
                     "beta connected to production cluster with three healthy workers and two queued jobs",
                 .{},
                 .narrow,
-                .left,
+                .{},
             );
         },
         .wrapped_styled => {
@@ -1621,7 +1621,7 @@ fn renderIteration(
                 if (iteration & 1 == 0) &first else &second,
                 .{},
                 .narrow,
-                .left,
+                .{},
             );
         },
         .wrapped_styled_ascii => {
@@ -1647,7 +1647,7 @@ fn renderIteration(
                 if (iteration & 1 == 0) &first else &second,
                 .{},
                 .narrow,
-                .left,
+                .{},
             );
         },
         .wrapped_styled_unicode => {
@@ -1673,7 +1673,7 @@ fn renderIteration(
                 if (iteration & 1 == 0) &first else &second,
                 .{},
                 .narrow,
-                .left,
+                .{},
             );
         },
         .layout_split => {

@@ -40,7 +40,9 @@ pub inline fn defaultAction(event: input.Event, mode: Mode) ?Action {
 }
 
 inline fn keyAction(key: input.Key, mode: Mode) ?Action {
-    if (key.action == .release or key.modifiers.alt or key.modifiers.super or
+    if (key.action == .release) return null;
+    if (key.text.len != 0) return .{ .insert_text = key.text };
+    if (key.modifiers.alt or key.modifiers.super or
         key.modifiers.hyper or key.modifiers.meta) return null;
     const extend = key.modifiers.shift;
     if (key.modifiers.control) {
@@ -73,7 +75,7 @@ inline fn keyAction(key: input.Key, mode: Mode) ?Action {
         .backspace => if (!extend) .delete_backward else null,
         .delete => if (!extend) .delete_forward else null,
         .enter => if (!extend and mode == .multiline) .insert_newline else null,
-        .codepoint => |codepoint| if (!extend) .{ .insert_codepoint = codepoint } else null,
+        .codepoint => |codepoint| .{ .insert_codepoint = if (extend) key.shifted_codepoint orelse codepoint else codepoint },
         else => null,
     };
 }

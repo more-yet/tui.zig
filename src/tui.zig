@@ -2,6 +2,7 @@
 //! Start with `editor.Model`, `widget.TextInput`, and `render.Renderer`.
 
 pub const text = @import("text.zig");
+pub const secureZero = @import("core/memory.zig").secureZero;
 pub const render = @import("render.zig");
 pub const graphics = @import("graphics.zig");
 pub const terminal = @import("terminal.zig");

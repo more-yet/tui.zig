@@ -1,3 +1,10 @@
+const std = @import("std");
+
+/// Non-elidable erasure. End all uses of the bytes before calling.
+pub fn secureZero(bytes: []u8) void {
+    std.crypto.secureZero(u8, bytes);
+}
+
 pub fn slicesOverlap(lhs: []const u8, rhs: []const u8) bool {
     if (lhs.len == 0 or rhs.len == 0) return false;
 

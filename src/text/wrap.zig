@@ -2,6 +2,11 @@ const std = @import("std");
 const grapheme = @import("grapheme.zig");
 const line_break = @import("line_break.zig");
 
+pub const Options = struct {
+    alignment: @import("line.zig").Alignment = .left,
+    first_row: usize = 0,
+};
+
 pub const Error = grapheme.WidthError || error{
     InvalidWidth,
     ZeroWidthGrapheme,
@@ -205,6 +210,23 @@ fn WrapIterator(comptime Storage: type) type {
                 .ascii => self.nextGeneral(false),
                 .unicode => self.nextGeneral(true),
             };
+        }
+
+        /// Traverses the prefix with the same wrapping rules as drawing.
+        pub fn skipRows(self: *Self, count: usize) Error!usize {
+            var skipped: usize = 0;
+            while (skipped < count) : (skipped += 1) {
+                if (try self.next() == null) break;
+            }
+            return skipped;
+        }
+
+        /// Counts on a copy; keeps this iterator's position unchanged.
+        pub fn countRemaining(self: Self) Error!usize {
+            var iterator = self;
+            var count: usize = 0;
+            while (try iterator.next() != null) count += 1;
+            return count;
         }
 
         pub inline fn asciiOnly(self: *const Self) bool {

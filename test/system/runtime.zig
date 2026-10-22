@@ -58,11 +58,21 @@ fn run(io: std.Io, scenario: Scenario) !void {
     const reader: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = true } };
     const writer: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = true } };
     defer reader.close(io);
-    defer writer.close(io);
+    var writer_open = true;
+    defer if (writer_open) writer.close(io);
     var bytes: [32]u8 = undefined;
     var timers: [0]tui.runtime.TimerSlot = .{};
     var runtime = try tui.runtime.Posix.init(io, reader, &bytes, &timers, .{ .signals = &signals });
     defer runtime.deinit();
+    var storage: tui.editor.FixedStorage(32) = .{};
+    var model = try tui.editor.Model.initSingleLine(storage.slices(), "");
+    if (scenario == .suspend_resume) {
+        try writer.writeStreamingAll(io, "\x1b[200~secret\x1b[20");
+        _ = model.handle((try runtime.step()).input);
+        _ = model.handle((try runtime.step()).input);
+        var slots: [3]tui.runtime.PollSlot = undefined;
+        try expect(try runtime.pollWithSources(&.{}, &slots) == null);
+    }
     try std.posix.raise(switch (scenario) {
         .interrupt => .INT,
         .terminate => .TERM,
@@ -74,7 +84,24 @@ fn run(io: std.Io, scenario: Scenario) !void {
         .suspend_resume => .suspend_requested,
     }, (try runtime.step()).signal);
     if (scenario == .suspend_resume) {
+        try expect(runtime.inputState().buffered_work);
+        try expect((try runtime.step()) == .input_failure);
+        _ = model.handle(.malformed);
         try signals.suspendProcess();
         try std.testing.expectEqual(tui.runtime.Signal.continued, (try runtime.step()).signal);
+        try writer.writeStreamingAll(io, "j\r\x1b[201~x");
+        const text = try runtime.step();
+        try std.testing.expectEqualStrings("x", text.input.text);
+        _ = model.handle(text.input);
+        try std.testing.expectEqualStrings("x", model.value());
+        try expect(runtime.inputState().pending == .none);
+        writer.close(io);
+        writer_open = false;
+        try expect(try runtime.step() == .eof);
+        try std.posix.raise(.CONT);
+        try std.testing.expectEqual(tui.runtime.Signal.continued, (try runtime.step()).signal);
+        var slots: [3]tui.runtime.PollSlot = undefined;
+        try expect(try runtime.pollWithSources(&.{}, &slots) == null);
+        try expect(!runtime.inputState().buffered_work and runtime.inputState().pending == .none);
     }
 }

@@ -184,7 +184,7 @@ pub const Encoder = struct {
 
         if (visibility_changed and !visible) try self.setCursorVisible(false);
         if (shape_changed) {
-            try self.emit(cursor_shape_sequences[@intFromEnum(target.shape)]);
+            try self.emit(cursor_shape_sequences[@backingInt(target.shape)]);
             self.cursor_state.cursor_shape_known = true;
             self.cursor_state.cursor_shape = target.shape;
         }

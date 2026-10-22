@@ -42,6 +42,20 @@ test "function key encodings preserve framing and metadata at every read split" 
         .{ .bytes = "\x1b[1;2:2S", .event = .{ .key = .{ .code = .{ .function = 4 }, .modifiers = .{ .shift = true }, .action = .repeat } } },
         .{ .bytes = "\x1b[1;5:3P", .event = .{ .key = .{ .code = .{ .function = 1 }, .modifiers = .{ .control = true }, .action = .release } } },
         .{ .bytes = "\x1b[13~", .event = .{ .key = .{ .code = .{ .function = 3 } } } },
+        .{ .bytes = "\x1b[13;1:3u", .event = .{ .key = .{ .code = .enter, .action = .release } } },
+        .{ .bytes = "\x1b[97;;u", .event = .{ .key = .{ .code = .{ .codepoint = 'a' } } } },
+        .{ .bytes = "\x1b[97:65u", .event = .malformed },
+        .{ .bytes = "\x1b[97::113u", .event = .{ .key = .{ .code = .{ .codepoint = 'a' }, .base_layout_codepoint = 'q' } } },
+        .{ .bytes = "\x1b[97:65:113;6:2;65:769u", .event = .{ .key = .{
+            .code = .{ .codepoint = 'a' },
+            .shifted_codepoint = 'A',
+            .base_layout_codepoint = 'q',
+            .modifiers = .{ .shift = true, .control = true },
+            .action = .repeat,
+            .text = "A\u{301}",
+        } } },
+        .{ .bytes = "\x1b[97;;27u", .event = .malformed },
+        .{ .bytes = "\x1b[97;;55296u", .event = .malformed },
         .{ .bytes = "\x1b[1;2R", .event = .{ .cursor_position = .{ .row = 0, .column = 1 } } },
         .{ .bytes = "\x1b[?1P", .event = .{ .terminal_reply = .{ .kind = .csi, .final = 'P', .raw = "?1" } } },
         .{ .bytes = "\x1b[[Z", .event = .malformed },
@@ -53,6 +67,25 @@ test "function key encodings preserve framing and metadata at every read split" 
             try testing.expectEqual(.none, parser.pending());
         }
     }
+}
+
+test "associated text stays owned after parser advancement and can be securely disposed" {
+    var parser: tui.input.Parser = .{};
+    const event = parser.next("\x1b[97;;233:769u").outcome.event;
+    var owned = try tui.input.OwnedEvent(32).init(event);
+    var moved = owned;
+    owned.secureDeinit();
+    _ = parser.next("x");
+    try testing.expectEqualStrings("\u{e9}\u{301}", moved.borrow().key.text);
+    moved.secureDeinit();
+    try testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&moved), 0));
+    _ = parser.next("\x1b[200~secret");
+    try testing.expectError(error.PendingInput, parser.secureDeinit());
+    _ = parser.cancelPending();
+    try testing.expectError(error.PendingInput, parser.secureDeinit());
+    _ = parser.next("\x1b[201~");
+    try parser.secureDeinit();
+    try testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&parser), 0));
 }
 
 test "cancelled paste discards payload and preserves every partial terminator" {
@@ -67,7 +100,8 @@ test "cancelled paste discards payload and preserves every partial terminator" {
         try expectEvents(&parser, &.{ end[prefix..], "x" }, &.{.{ .text = "x" }});
         try testing.expectEqual(.none, parser.pending());
     }
-    const payload = "j\r\t\x1b[A\x1b[200~\x1b[201X" ++ ("z" ** 1024) ++ "\x1b\x1b[201~x";
+    const repeated_z: [1024]u8 = @splat('z');
+    const payload = "j\r\t\x1b[A\x1b[200~\x1b[201X" ++ repeated_z ++ "\x1b\x1b[201~x";
     for (0..payload.len + 1) |split| {
         var parser: tui.input.Parser = .{};
         try expectEvents(&parser, &.{"\x1b[200~"}, &.{.paste_start});
@@ -99,13 +133,15 @@ test "unterminated paste ends safely at EOF and ordinary sequences still cancel"
 
 test "control strings share bounded framing and preserve input after rejection" {
     const limit = tui.input.Parser.max_terminal_reply_bytes;
+    const full_payload: [limit]u8 = @splat('a');
+    const oversized_payload: [limit + 1]u8 = @splat('a');
     const cases = .{
         "\x1b]title\x1b\x1b\\x",
         "\x1b]title\x1b\x07x",
-        "\x1b]" ++ ("a" ** limit) ++ "\x1b\x1b\\x",
-        "\x1b]" ++ ("a" ** (limit + 1)) ++ "\x1b\x07x",
+        "\x1b]" ++ full_payload ++ "\x1b\x1b\\x",
+        "\x1b]" ++ oversized_payload ++ "\x1b\x07x",
         "\x1b_Gi=1;bad\x1b\x1b\\x",
-        "\x1b_" ++ ("a" ** limit) ++ "\x1b\x1b\\x",
+        "\x1b_" ++ full_payload ++ "\x1b\x1b\\x",
     };
     inline for (cases) |bytes| {
         for (0..bytes.len + 1) |split| {
@@ -137,8 +173,9 @@ test "control strings share bounded framing and preserve input after rejection" 
 }
 
 test "OSC accepts BEL and ST while APC accepts ST with the full payload capacity" {
+    const full_payload: [tui.input.Parser.max_terminal_reply_bytes]u8 = @splat('a');
     inline for (.{ .{ "\x1b]", "\x07", ReplyKind.osc }, .{ "\x1b]", "\x1b\\", ReplyKind.osc }, .{ "\x1b_", "\x1b\\", ReplyKind.apc } }) |case| {
-        const bytes = case[0] ++ ("a" ** tui.input.Parser.max_terminal_reply_bytes) ++ case[1];
+        const bytes = case[0] ++ full_payload ++ case[1];
         var parser: tui.input.Parser = .{};
         for (bytes, 0..) |byte, index| {
             const parsed = parser.next(&.{byte});
@@ -148,7 +185,7 @@ test "OSC accepts BEL and ST while APC accepts ST with the full payload capacity
             } else {
                 const reply = parsed.outcome.event.terminal_reply;
                 try testing.expectEqual(case[2], reply.kind);
-                try testing.expectEqualStrings("a" ** tui.input.Parser.max_terminal_reply_bytes, reply.raw);
+                try testing.expectEqualStrings(&full_payload, reply.raw);
             }
         }
     }

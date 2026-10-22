@@ -37,6 +37,14 @@ pub const InputHistory = struct {
         self.resetNavigation();
     }
 
+    /// Expires borrowed entries and draft; the history remains reusable.
+    pub fn secureClear(self: *InputHistory) void {
+        memory.secureZero(std.mem.sliceAsBytes(self.entries));
+        memory.secureZero(self.bytes);
+        memory.secureZero(self.draft);
+        self.clear();
+    }
+
     pub fn count(self: *const InputHistory) usize {
         return self.len;
     }

@@ -5,7 +5,7 @@ pub const Update = enum(u2) {
     relayout,
 
     pub inline fn merge(self: Update, other: Update) Update {
-        return @enumFromInt(@max(@intFromEnum(self), @intFromEnum(other)));
+        return @fromBackingInt(@intCast(@max(@backingInt(self), @backingInt(other))));
     }
 
     pub inline fn isHandled(self: Update) bool {
@@ -13,7 +13,7 @@ pub const Update = enum(u2) {
     }
 
     pub inline fn needsRedraw(self: Update) bool {
-        return @intFromEnum(self) >= @intFromEnum(Update.redraw);
+        return @backingInt(self) >= @backingInt(Update.redraw);
     }
 
     pub inline fn needsLayout(self: Update) bool {

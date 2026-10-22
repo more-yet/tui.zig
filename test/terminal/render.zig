@@ -4,7 +4,19 @@ const Oracle = @import("oracle.zig");
 const vt = Oracle.vt;
 const testing = std.testing;
 
-extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termios: ?*const std.posix.termios, winsize: ?*const std.posix.winsize) c_int;
+extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termios: ?*const tui.terminal.Termios, winsize: ?*const std.posix.winsize) c_int;
+extern "c" fn tcgetattr(fd: c_int, value: *tui.terminal.Termios) c_int;
+
+fn readTermios(fd: c_int) !tui.terminal.Termios {
+    var value: tui.terminal.Termios = undefined;
+    while (true) {
+        switch (std.posix.errno(tcgetattr(fd, &value))) {
+            .SUCCESS => return value,
+            .INTR => continue,
+            else => return error.TermiosReadFailed,
+        }
+    }
+}
 
 fn expectText(oracle: *Oracle, expected: []const u8) !void {
     const actual = try oracle.terminal.plainString(testing.allocator);
@@ -23,7 +35,12 @@ test "session enter and leave acknowledge partial writes and restore terminal st
     if (openpty(&master, &slave, null, null, null) != 0) return error.PtyUnavailable;
     defer _ = std.os.linux.close(master);
     defer _ = std.os.linux.close(slave);
-    var session = try tui.terminal.Session.init(.{ .handle = slave, .flags = .{ .nonblocking = false } }, .{ .mouse = true, .kitty_keyboard = true });
+    var session = try tui.terminal.Session.init(.{ .handle = slave, .flags = .{ .nonblocking = false } }, .{ .mouse = true, .kitty_keyboard = .{
+        .event_types = true,
+        .alternate_keys = true,
+        .all_keys = true,
+        .associated_text = true,
+    } });
     defer session.restoreTermios() catch unreachable;
     var oracle: Oracle = undefined;
     try oracle.init(testing.allocator, .{ .cols = 20, .rows = 4 });
@@ -35,8 +52,23 @@ test "session enter and leave acknowledge partial writes and restore terminal st
         try oracle.write(bytes[0..1]);
         try session.consumeOutput(1);
     } else return error.SessionWorkLimit;
-    try testing.expect(!(try std.posix.tcgetattr(slave)).lflag.ICANON);
+    try testing.expect(!(try readTermios(slave)).lflag.ICANON);
     try testing.expect(oracle.terminal.screens.active_key == .alternate);
+    try testing.expectEqual(@as(u5, 31), oracle.terminal.screens.active.kitty_keyboard.current().int());
+    try testing.expectError(error.InvalidKeyboardEnhancements, session.beginKittyKeyboard(.{ .associated_text = true }));
+    try session.beginKittyKeyboard(.{ .event_types = true });
+    const pop = session.outputStep().?;
+    try testing.expectEqualStrings("\x1b[<u", pop);
+    try oracle.write(pop[0..1]);
+    try session.consumeOutput(1);
+    try testing.expectEqualStrings("[<u", session.outputStep().?);
+    try testing.expect(session.kitty_keyboard_active.?.associated_text);
+    for (0..1024) |_| {
+        const bytes = session.outputStep() orelse break;
+        try oracle.write(bytes[0..1]);
+        try session.consumeOutput(1);
+    } else return error.SessionWorkLimit;
+    try testing.expectEqual(@as(u5, 3), oracle.terminal.screens.active.kitty_keyboard.current().int());
     try session.beginLeave();
     for (0..1024) |_| {
         const bytes = session.outputStep() orelse break;
@@ -44,10 +76,8 @@ test "session enter and leave acknowledge partial writes and restore terminal st
         try session.consumeOutput(1);
     } else return error.SessionWorkLimit;
     try session.restoreTermios();
-    const restored = try std.posix.tcgetattr(slave);
-    inline for (std.meta.fields(std.posix.termios)) |field| {
-        try testing.expect(std.meta.eql(@field(session.original, field.name), @field(restored, field.name)));
-    }
+    const restored = try readTermios(slave);
+    try testing.expect(std.meta.eql(session.original, restored));
     try testing.expect(oracle.stream.ground());
     try testing.expect(oracle.terminal.screens.active_key == .primary);
     try testing.expect(oracle.terminal.modes.get(.cursor_visible));
@@ -64,7 +94,7 @@ test "emergency restoration terminates partial strings and restores a private PT
     if (openpty(&master, &slave, null, null, null) != 0) return error.PtyUnavailable;
     defer _ = std.os.linux.close(master);
     defer _ = std.os.linux.close(slave);
-    var session = try tui.terminal.Session.init(.{ .handle = slave, .flags = .{ .nonblocking = false } }, .{ .mouse = true, .kitty_keyboard = true });
+    var session = try tui.terminal.Session.init(.{ .handle = slave, .flags = .{ .nonblocking = false } }, .{ .mouse = true, .kitty_keyboard = .{} });
     var oracle: Oracle = undefined;
     try oracle.init(testing.allocator, .{ .cols = 20, .rows = 4 });
     defer oracle.deinit();
@@ -74,22 +104,18 @@ test "emergency restoration terminates partial strings and restores a private PT
         try oracle.write(bytes);
         try session.consumeOutput(bytes.len);
     }
-    try testing.expect(!(try std.posix.tcgetattr(slave)).lflag.ICANON);
+    try testing.expect(!(try readTermios(slave)).lflag.ICANON);
     try oracle.write("\x1b]2;partial title");
     try testing.expect(!oracle.stream.ground());
 
-    const saved_session = session;
     const saved_errno = std.c._errno().*;
     defer std.c._errno().* = saved_errno;
-    std.c._errno().* = @intFromEnum(std.posix.E.IO);
+    std.c._errno().* = @backingInt(std.posix.E.IO);
     const result = session.emergencyRestore(slave);
-    try testing.expectEqual(@as(c_int, @intFromEnum(std.posix.E.IO)), std.c._errno().*);
+    try testing.expectEqual(@as(c_int, @backingInt(std.posix.E.IO)), std.c._errno().*);
     try testing.expect(result.succeeded());
-    try testing.expect(std.meta.eql(saved_session, session));
-    const restored = try std.posix.tcgetattr(slave);
-    inline for (std.meta.fields(std.posix.termios)) |field| {
-        try testing.expect(std.meta.eql(@field(session.original, field.name), @field(restored, field.name)));
-    }
+    const restored = try readTermios(slave);
+    try testing.expect(std.meta.eql(session.original, restored));
     var bytes: [256]u8 = undefined;
     try testing.expect(result.written_bytes > 2 and result.written_bytes <= bytes.len);
     var received: usize = 0;

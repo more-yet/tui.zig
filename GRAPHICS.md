@@ -24,6 +24,11 @@ cancellation output. `cancel(delete)` drains an exposed command and sends the
 chosen delete; keep driving output until complete. Finish a chunked upload before
 starting another graphics command. Retrying animation edits can duplicate effects.
 
+After completion and after all output borrows end, `try sender.secureDeinit()`
+erases the sender's full storage. It refuses active output and does not cancel
+uploads, delete terminal images, or wipe borrowed source bytes. Clear those bytes
+yourself only after their separate terminal/resource lifetime ends.
+
 ## Local resources and replies
 
 - Keep files or shared memory alive until a correlated reply confirms consumption,

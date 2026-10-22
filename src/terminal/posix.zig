@@ -1,13 +1,52 @@
 const std = @import("std");
 const geometry = @import("../core/geometry.zig");
 
+/// Native x86_64-linux-gnu libc ABI, including all 32 control characters.
+pub const Termios = extern struct {
+    iflag: std.os.linux.tc_iflag_t,
+    oflag: std.os.linux.tc_oflag_t,
+    cflag: std.os.linux.tc_cflag_t,
+    lflag: std.os.linux.tc_lflag_t,
+    line: u8,
+    cc: [32]u8,
+    ispeed: u32,
+    ospeed: u32,
+};
+
+extern "c" fn tcgetattr(fd: c_int, value: *Termios) c_int;
+extern "c" fn tcsetattr(fd: c_int, action: c_int, value: *const Termios) c_int;
+
+const tcsanow: c_int = 0;
+
+pub const KeyboardEnhancements = struct {
+    disambiguate: bool = true,
+    event_types: bool = false,
+    alternate_keys: bool = false,
+    all_keys: bool = false,
+    associated_text: bool = false,
+
+    fn validate(self: KeyboardEnhancements) error{InvalidKeyboardEnhancements}!void {
+        if (self.associated_text and !self.all_keys) return error.InvalidKeyboardEnhancements;
+    }
+
+    fn flags(self: KeyboardEnhancements) u5 {
+        return @as(u5, @intFromBool(self.disambiguate)) |
+            (@as(u5, @intFromBool(self.event_types)) << 1) |
+            (@as(u5, @intFromBool(self.alternate_keys)) << 2) |
+            (@as(u5, @intFromBool(self.all_keys)) << 3) |
+            (@as(u5, @intFromBool(self.associated_text)) << 4);
+    }
+};
+
 pub const Options = struct {
     alternate_screen: bool = true,
     hide_cursor: bool = true,
     bracketed_paste: bool = true,
     focus_events: bool = true,
     mouse: bool = false,
-    kitty_keyboard: bool = false,
+    /// Null leaves the keyboard stack untouched. Releases for Enter/Tab/Backspace
+    /// require event_types and all_keys; associated_text preserves generated text.
+    kitty_keyboard: ?KeyboardEnhancements = null,
 };
 
 pub const EmergencyRestoreResult = struct {
@@ -51,12 +90,11 @@ const Command = enum {
 
 pub const Session = struct {
     input: std.Io.File,
-    original: std.posix.termios,
+    original: Termios,
     options: Options,
     terminal_restore_needed: bool = false,
     termios_restore_needed: bool = false,
-    kitty_keyboard_requested: bool,
-    kitty_keyboard_active: bool = false,
+    kitty_keyboard_active: ?KeyboardEnhancements = null,
     alternate_screen_active: bool = false,
     bracketed_paste_active: bool = false,
     focus_events_active: bool = false,
@@ -65,18 +103,18 @@ pub const Session = struct {
     cursor_hidden: bool = false,
     transition: Transition = .idle,
     transition_index: u8 = 0,
-    kitty_target: bool = false,
+    keyboard_command: [16]u8 = undefined,
     current_command: Command = .none,
     command_offset: u8 = 0,
 
     /// Borrows the descriptor without changing terminal state. Keep it open until cleanup.
     pub fn init(input: std.Io.File, options: Options) !Session {
+        if (options.kitty_keyboard) |keyboard| try keyboard.validate();
         const original = try getTermiosOnce(input.handle);
         return .{
             .input = input,
             .original = original,
             .options = options,
-            .kitty_keyboard_requested = options.kitty_keyboard,
         };
     }
 
@@ -100,18 +138,16 @@ pub const Session = struct {
         self.startTransition(.leaving);
     }
 
-    pub fn beginKittyKeyboard(self: *Session, enabled: bool) !void {
+    /// Replaces the session-owned keyboard stack frame after draining any output.
+    pub fn beginKittyKeyboard(self: *Session, enhancements: ?KeyboardEnhancements) !void {
+        if (enhancements) |keyboard| try keyboard.validate();
         if (!self.terminal_restore_needed) {
-            self.kitty_keyboard_requested = enabled;
+            self.options.kitty_keyboard = enhancements;
             return;
         }
         if (self.transition != .active) return error.TransitionActive;
-        if (enabled == self.kitty_keyboard_active) {
-            self.kitty_keyboard_requested = enabled;
-            return;
-        }
-        self.kitty_keyboard_requested = enabled;
-        self.kitty_target = enabled;
+        self.options.kitty_keyboard = enhancements;
+        if (std.meta.eql(enhancements, self.kitty_keyboard_active)) return;
         self.startTransition(.kitty);
     }
 
@@ -119,7 +155,7 @@ pub const Session = struct {
     pub fn outputStep(self: *Session) ?[]const u8 {
         while (true) {
             if (self.current_command != .none) {
-                const bytes = commandBytes(self.current_command);
+                const bytes = commandBytes(self.current_command, self.options.kitty_keyboard, &self.keyboard_command);
                 return bytes[self.command_offset..];
             }
             self.current_command = self.selectNextCommand() orelse {
@@ -139,7 +175,7 @@ pub const Session = struct {
     /// Pass only the actual accepted byte count, including partial writes.
     pub fn consumeOutput(self: *Session, count: usize) !void {
         if (self.current_command == .none) return error.NoSessionOutput;
-        const bytes = commandBytes(self.current_command);
+        const bytes = commandBytes(self.current_command, self.options.kitty_keyboard, &self.keyboard_command);
         const remaining = bytes.len - self.command_offset;
         if (count > remaining) return error.InvalidByteCount;
         if (count == 0) return;
@@ -164,9 +200,9 @@ pub const Session = struct {
         defer std.c._errno().* = caller_errno;
 
         var report: EmergencyRestoreResult = .{};
-        const termios_result = std.posix.system.tcsetattr(self.input.handle, .NOW, &self.original);
+        const termios_result = tcsetattr(self.input.handle, tcsanow, &self.original);
         const termios_errno = std.posix.errno(termios_result);
-        if (termios_errno != .SUCCESS) report.termios_errno = @intFromEnum(termios_errno);
+        if (termios_errno != .SUCCESS) report.termios_errno = @backingInt(termios_errno);
 
         var buffer: [130]u8 = undefined;
         @memcpy(buffer[0..2], "\x1b\\");
@@ -178,7 +214,7 @@ pub const Session = struct {
         if (write_errno == .SUCCESS) {
             report.written_bytes = @intCast(write_result);
         } else {
-            report.output_errno = @intFromEnum(write_errno);
+            report.output_errno = @backingInt(write_errno);
         }
         return report;
     }
@@ -194,24 +230,25 @@ pub const Session = struct {
         while (true) {
             const command: ?Command = switch (self.transition) {
                 .idle, .active => return null,
-                .kitty => if (self.transition_index == 0)
-                    (if (self.kitty_target) .kitty_push else .kitty_pop)
-                else
-                    return null,
+                .kitty => switch (self.transition_index) {
+                    0 => if (self.kitty_keyboard_active != null) .kitty_pop else null,
+                    1 => if (self.options.kitty_keyboard != null) .kitty_push else null,
+                    else => return null,
+                },
                 .entering => switch (self.transition_index) {
                     0 => if (self.options.alternate_screen and !self.alternate_screen_active) .alternate_enter else null,
                     1 => if (self.options.bracketed_paste and !self.bracketed_paste_active) .paste_enter else null,
                     2 => if (self.options.focus_events and !self.focus_events_active) .focus_enter else null,
                     3 => if (self.options.mouse and !self.mouse_button_active) .mouse_button_enter else null,
                     4 => if (self.options.mouse and !self.mouse_sgr_active) .mouse_sgr_enter else null,
-                    5 => if (self.kitty_keyboard_requested and !self.kitty_keyboard_active) .kitty_push else null,
+                    5 => if (self.options.kitty_keyboard != null) .kitty_push else null,
                     6 => if (self.options.hide_cursor and !self.cursor_hidden) .cursor_hide else null,
                     else => return null,
                 },
                 .leaving => switch (self.transition_index) {
                     0 => .reset,
                     1 => if (self.cursor_hidden) .cursor_show else null,
-                    2 => if (self.kitty_keyboard_active) .kitty_pop else null,
+                    2 => if (self.kitty_keyboard_active != null) .kitty_pop else null,
                     3 => if (self.mouse_sgr_active) .mouse_sgr_leave else null,
                     4 => if (self.mouse_button_active) .mouse_button_leave else null,
                     5 => if (self.focus_events_active) .focus_leave else null,
@@ -238,15 +275,21 @@ pub const Session = struct {
             .mouse_button_leave => self.mouse_button_active = false,
             .mouse_sgr_enter => self.mouse_sgr_active = true,
             .mouse_sgr_leave => self.mouse_sgr_active = false,
-            .kitty_push => self.kitty_keyboard_active = true,
-            .kitty_pop => self.kitty_keyboard_active = false,
+            .kitty_push => self.kitty_keyboard_active = self.options.kitty_keyboard,
+            .kitty_pop => self.kitty_keyboard_active = null,
             .cursor_hide => self.cursor_hidden = true,
             .cursor_show => self.cursor_hidden = false,
         }
     }
 };
 
-pub fn querySize(file: std.Io.File) !geometry.Size {
+pub const PixelSize = struct { width: u16, height: u16 };
+pub const Geometry = struct {
+    cells: geometry.Size,
+    pixels: ?PixelSize,
+};
+
+pub fn queryGeometry(file: std.Io.File) !Geometry {
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const result = std.posix.system.ioctl(file.handle, @as(u32, std.posix.T.IOCGWINSZ), @intFromPtr(&winsize));
     switch (std.posix.errno(result)) {
@@ -257,12 +300,15 @@ pub fn querySize(file: std.Io.File) !geometry.Size {
         else => return error.Unexpected,
     }
     if (winsize.col == 0 or winsize.row == 0) return error.TerminalSizeUnavailable;
-    return .{ .width = winsize.col, .height = winsize.row };
+    return .{
+        .cells = .{ .width = winsize.col, .height = winsize.row },
+        .pixels = if (winsize.xpixel == 0 or winsize.ypixel == 0) null else .{ .width = winsize.xpixel, .height = winsize.ypixel },
+    };
 }
 
-fn getTermiosOnce(fd: std.posix.fd_t) !std.posix.termios {
-    var result: std.posix.termios = undefined;
-    switch (std.posix.errno(std.posix.system.tcgetattr(fd, &result))) {
+fn getTermiosOnce(fd: std.posix.fd_t) !Termios {
+    var result: Termios = undefined;
+    switch (std.posix.errno(tcgetattr(fd, &result))) {
         .SUCCESS => return result,
         .INTR => return error.Interrupted,
         .BADF => return error.InvalidDescriptor,
@@ -271,8 +317,8 @@ fn getTermiosOnce(fd: std.posix.fd_t) !std.posix.termios {
     }
 }
 
-fn setTermiosOnce(fd: std.posix.fd_t, value: std.posix.termios) !void {
-    switch (std.posix.errno(std.posix.system.tcsetattr(fd, .NOW, &value))) {
+fn setTermiosOnce(fd: std.posix.fd_t, value: Termios) !void {
+    switch (std.posix.errno(tcsetattr(fd, tcsanow, &value))) {
         .SUCCESS => {},
         .INTR => return error.Interrupted,
         .BADF => return error.InvalidDescriptor,
@@ -282,7 +328,7 @@ fn setTermiosOnce(fd: std.posix.fd_t, value: std.posix.termios) !void {
     }
 }
 
-fn makeRaw(original: std.posix.termios) std.posix.termios {
+fn makeRaw(original: Termios) Termios {
     var raw = original;
     raw.iflag.IGNBRK = false;
     raw.iflag.BRKINT = false;
@@ -301,12 +347,12 @@ fn makeRaw(original: std.posix.termios) std.posix.termios {
     raw.lflag.ICANON = false;
     raw.lflag.IEXTEN = false;
     raw.lflag.ISIG = false;
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+    raw.cc[@backingInt(std.posix.V.TIME)] = 0;
     return raw;
 }
 
-fn commandBytes(command: Command) []const u8 {
+fn commandBytes(command: Command, keyboard: ?KeyboardEnhancements, buffer: *[16]u8) []const u8 {
     return switch (command) {
         .none => &.{},
         .alternate_enter => "\x1b[?1049h",
@@ -314,7 +360,7 @@ fn commandBytes(command: Command) []const u8 {
         .focus_enter => "\x1b[?1004h",
         .mouse_button_enter => "\x1b[?1002h",
         .mouse_sgr_enter => "\x1b[?1006h",
-        .kitty_push => "\x1b[>1u",
+        .kitty_push => std.fmt.bufPrint(buffer, "\x1b[>{d}u", .{keyboard.?.flags()}) catch unreachable,
         .cursor_hide => "\x1b[?25l",
         .reset => "\x1b[?2026l\x1b[0m\x1b[0 q",
         .cursor_show => "\x1b[?25h",
@@ -330,14 +376,15 @@ fn commandBytes(command: Command) []const u8 {
 fn leaveSequence(session: *const Session, buffer: []u8) []const u8 {
     if (!session.terminal_restore_needed) return buffer[0..0];
     var length: usize = 0;
-    append(buffer, &length, commandBytes(.reset));
-    if (session.cursor_hidden) append(buffer, &length, commandBytes(.cursor_show));
-    if (session.kitty_keyboard_active) append(buffer, &length, commandBytes(.kitty_pop));
-    if (session.mouse_sgr_active) append(buffer, &length, commandBytes(.mouse_sgr_leave));
-    if (session.mouse_button_active) append(buffer, &length, commandBytes(.mouse_button_leave));
-    if (session.focus_events_active) append(buffer, &length, commandBytes(.focus_leave));
-    if (session.bracketed_paste_active) append(buffer, &length, commandBytes(.paste_leave));
-    if (session.alternate_screen_active) append(buffer, &length, commandBytes(.alternate_leave));
+    var keyboard_buffer: [16]u8 = undefined;
+    append(buffer, &length, commandBytes(.reset, null, &keyboard_buffer));
+    if (session.cursor_hidden) append(buffer, &length, commandBytes(.cursor_show, null, &keyboard_buffer));
+    if (session.kitty_keyboard_active != null) append(buffer, &length, commandBytes(.kitty_pop, null, &keyboard_buffer));
+    if (session.mouse_sgr_active) append(buffer, &length, commandBytes(.mouse_sgr_leave, null, &keyboard_buffer));
+    if (session.mouse_button_active) append(buffer, &length, commandBytes(.mouse_button_leave, null, &keyboard_buffer));
+    if (session.focus_events_active) append(buffer, &length, commandBytes(.focus_leave, null, &keyboard_buffer));
+    if (session.bracketed_paste_active) append(buffer, &length, commandBytes(.paste_leave, null, &keyboard_buffer));
+    if (session.alternate_screen_active) append(buffer, &length, commandBytes(.alternate_leave, null, &keyboard_buffer));
     return buffer[0..length];
 }
 
