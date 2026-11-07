@@ -268,7 +268,6 @@ pub fn LineDecoder(comptime max_line_bytes_value: usize) type {
         }
 
         inline fn appendComplete(ring: *Ring, result: *DecodeResult, line: []const u8) void {
-            std.debug.assert(line.len <= max_line_bytes);
             const appended = if (printableAscii(line))
                 ring.appendValid(line)
             else

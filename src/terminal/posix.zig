@@ -194,7 +194,7 @@ pub const Session = struct {
         self.termios_restore_needed = false;
     }
 
-    /// Last-resort restoration after output failure; one bounded write, no retries.
+    /// Restore termios and attempt leave output through a nonblocking descriptor.
     pub fn emergencyRestore(self: *const Session, output_fd: std.posix.fd_t) EmergencyRestoreResult {
         const caller_errno = std.c._errno().*;
         defer std.c._errno().* = caller_errno;

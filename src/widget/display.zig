@@ -105,7 +105,7 @@ pub const Gauge = struct {
     empty: theme.Role = .{},
     state: theme.State = .normal,
 
-    /// Filled cells for custom drawing, e.g. `gauge.filledWidth(surface.size().width)`.
+    /// Filled cells for the supplied track width.
     pub fn filledWidth(self: *const Gauge, width: u16) u16 {
         if (self.total == 0) return 0;
         return @intCast((@as(u128, @min(self.value, self.total)) * width) / self.total);

@@ -11,7 +11,7 @@ pub const TextArea = struct {
     selection_role: theme.Role = .{
         .normal = .{ .attributes = .{ .reverse = true } },
     },
-    /// Call `model.cancelPaste()` if disable/re-enable happens between widget operations.
+    /// Cancel staged paste when disabling or changing its input target.
     enabled: bool = true,
     focused: bool = false,
     /// Set false when the application uses the native terminal cursor.
@@ -19,10 +19,7 @@ pub const TextArea = struct {
     pending_failure: ?editor.EditError = null,
 
     pub fn handle(self: *TextArea, event: input.Event) Update {
-        if (!self.enabled) {
-            self.model.cancelPaste();
-            return .ignored;
-        }
+        if (!self.enabled) return .ignored;
         const result = self.model.handle(event);
         if (result.failure) |failure| if (self.pending_failure == null) {
             self.pending_failure = failure;
@@ -41,13 +38,11 @@ pub const TextArea = struct {
     }
 
     pub fn layout(self: *TextArea, size: render.Size) bool {
-        if (!self.enabled) self.model.cancelPaste();
         return self.model.setViewportSize(size.width, size.height);
     }
 
     /// Call `layout(size)` first. Returns null when the caret should be hidden.
     pub fn caretPosition(self: *const TextArea) ?render.Point {
-        if (!self.enabled) self.model.cancelPaste();
         const caret = self.visibleCaret() orelse return null;
         return .{ .x = caret.screen_column, .y = @intCast(caret.row - self.model.viewport.top_row) };
     }
@@ -61,7 +56,6 @@ pub const TextArea = struct {
     }
 
     pub fn draw(self: *const TextArea, surface: *render.Surface) !void {
-        if (!self.enabled) self.model.cancelPaste();
         const size = surface.size();
         std.debug.assert(self.model.viewport.width == size.width);
         std.debug.assert(self.model.viewport.height == size.height);

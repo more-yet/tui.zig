@@ -30,6 +30,7 @@ pub const App = struct {
 
     pub fn layout(self: *App, size: tui.render.Size) void {
         self.bounds = tui.render.Rect.fromSize(size);
+        _ = self.state.reveal(self.provider.count(), size.height -| 1);
     }
 
     pub fn handle(self: *App, event: tui.input.Event) tui.widget.Update {

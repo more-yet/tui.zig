@@ -15,7 +15,7 @@ pub const Scrollbar = struct {
     thumb_role: theme.Role = .{},
     state: theme.State = .normal,
 
-    /// Track-local cell geometry for custom drawing, e.g. `bar.geometry(surface.size().height)`.
+    /// Track-local thumb geometry for custom drawing.
     /// Returns null for an empty track, content, or viewport; clamps top_row to the scroll range.
     pub fn geometry(self: *const Scrollbar, track_height: u16) ?Thumb {
         if (track_height == 0 or self.total_rows == 0 or self.visible_rows == 0) return null;

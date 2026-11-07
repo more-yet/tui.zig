@@ -20,9 +20,8 @@ pub fn Scrollback(comptime Provider: type) type {
         const Self = @This();
 
         pub fn handle(self: *Self, event: input.Event) Update {
-            const count = self.provider.count();
-            _ = self.viewport.update(count, self.bounds.height, 0);
             if (!self.enabled) return .ignored;
+            const count = self.provider.count();
 
             const changed = switch (event) {
                 .key => |key| key: {
@@ -51,11 +50,10 @@ pub fn Scrollback(comptime Provider: type) type {
             return if (changed) .redraw else .handled;
         }
 
-        pub fn draw(self: *Self, surface: *render.Surface) !void {
+        pub fn draw(self: *const Self, surface: *render.Surface) !void {
             const size: render.Size = .{ .width = self.bounds.width, .height = self.bounds.height };
             std.debug.assert(std.meta.eql(size, surface.size()));
             const count = self.provider.count();
-            _ = self.viewport.update(count, size.height, 0);
             const visible = self.viewport.visibleRange(count, size.height);
             const style = self.role.resolve(theme.State.from(self.enabled, self.focused));
             var y: u16 = 0;

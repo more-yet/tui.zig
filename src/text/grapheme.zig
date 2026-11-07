@@ -96,7 +96,7 @@ fn widthValidated(cluster: []const u8, profile: WidthProfile) WidthError!u2 {
         has_zwj = has_zwj or property == .zwj;
     }
 
-    if (has_emoji_selector or (has_extended_pictographic and has_zwj)) return 2;
+    if ((has_emoji_selector and result != 0) or (has_extended_pictographic and has_zwj)) return 2;
     if (has_emoji_presentation and !has_text_selector) return 2;
     return result;
 }

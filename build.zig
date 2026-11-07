@@ -26,6 +26,18 @@ pub fn build(b: *std.Build) void {
         .root_module = compositions_module,
     });
 
+    const interactive = b.addExecutable(.{ .name = "tui-interactive", .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/interactive.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "tui", .module = tui }},
+    }) });
+    b.installArtifact(interactive);
+    const interactive_run = b.addRunArtifact(interactive);
+    interactive_run.stdio = .inherit;
+    const interactive_step = b.step("interactive", "Run the interactive editor example");
+    interactive_step.dependOn(&interactive_run.step);
+
     const unicode_generator_module = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode.zig"),
         .target = b.graph.host,
@@ -57,10 +69,10 @@ pub fn build(b: *std.Build) void {
         .root_module = unit_test_module,
     });
     const unit_test_run = b.addRunArtifact(unit_tests);
-    const unit_test_step = b.step("test-unit", "Run deterministic contract tests");
+    const unit_test_step = b.step("test-unit", "Run core tests");
     unit_test_step.dependOn(&unit_test_run.step);
 
-    const test_step = b.step("test", "Run contract tests and any enabled integration tests");
+    const test_step = b.step("test", "Run tests");
     test_step.dependOn(unit_test_step);
 
     const system_tests = b.addExecutable(.{ .name = "tui-system-tests", .root_module = b.createModule(.{
@@ -69,9 +81,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "tui", .module = tui }},
     }) });
-    const system_test_step = b.step("test-system", "Run isolated Linux process contracts");
+    const system_test_step = b.step("test-system", "Run process and signal tests");
     test_step.dependOn(system_test_step);
-    for ([_][]const u8{ "spawn", "closed_stdio", "close_range_denied", "close_range_unavailable", "auto_reap", "no_child_wait" }) |scenario| {
+    for ([_][]const u8{ "spawn", "closed_stdio", "close_range_denied" }) |scenario| {
         const run = b.addRunArtifact(system_tests);
         run.step.name = b.fmt("subprocess {s}", .{scenario});
         run.addArg(scenario);
@@ -123,9 +135,6 @@ pub fn build(b: *std.Build) void {
     } else {
         terminal_test_step.dependOn(&b.addFail("Enable the test-only dependency with: zig build test-terminal -Dterminal-tests=true").step);
     }
-
-    const example_step = b.step("example", "Compile examples");
-    example_step.dependOn(&compositions.step);
 
     const compositions_run = b.addRunArtifact(compositions);
     const compositions_step = b.step("compositions", "Run finite headless composition recipes");

@@ -23,3 +23,11 @@ test "GB11 joins pictographs with Extend before but not after ZWJ" {
         "\u{1f469}",
     });
 }
+
+test "emoji selectors preserve zero-width clusters" {
+    for ([_][]const u8{ "\u{fe0f}", "\u{301}\u{fe0f}", "\u{200d}\u{fe0f}" }) |bytes| {
+        try testing.expectEqual(@as(u2, 0), try tui.text.graphemeWidth(bytes, .narrow));
+        try testing.expectError(error.ZeroWidthGrapheme, tui.text.measureLine(bytes, .narrow));
+    }
+    try testing.expectEqual(@as(u2, 2), try tui.text.graphemeWidth("\u{2764}\u{fe0f}", .narrow));
+}

@@ -205,7 +205,6 @@ pub const SignalSource = struct {
             error.InvalidDescriptor => return error.InvalidSignalDescriptor,
             else => return err,
         };
-        if (count % @sizeOf(std.os.linux.signalfd_siginfo) != 0) return error.Unexpected;
         var result: u8 = 0;
         for (records[0 .. count / @sizeOf(std.os.linux.signalfd_siginfo)]) |record| {
             result |= signalNumberBit(record.signo);
@@ -305,14 +304,14 @@ pub const Posix = struct {
     ) !Posix {
         if (read_buffer.len == 0) return error.EmptyReadBuffer;
         if (timer_storage.len > std.math.maxInt(u32)) return error.CapacityTooLarge;
-        if (!input_file.flags.nonblocking) return error.BlockingInput;
         const input_nonblocking = descriptorIsNonblocking(input_file.handle) catch |err| switch (err) {
             error.InvalidDescriptor => return error.InvalidInputDescriptor,
             else => return err,
         };
         if (!input_nonblocking) return error.BlockingInput;
-        try validateDuration(options.input_timeouts.escape);
-        try validateDuration(options.input_timeouts.sequence);
+        if (options.input_timeouts.escape.nanoseconds <= 0 or options.input_timeouts.sequence.nanoseconds <= 0) {
+            return error.InvalidTimeout;
+        }
         if (options.signals) |signals| {
             if (signals.attached) return error.SignalSourceAlreadyAttached;
             if (signals.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
@@ -339,8 +338,7 @@ pub const Posix = struct {
         self.* = undefined;
     }
 
-    /// Join notifier users and end event borrows first. Wipes the full read buffer,
-    /// not timers, SignalSource, or kernel input. Reinitialize before reuse.
+    /// Join notifier users and release event borrows before erasing runtime and read-buffer storage.
     pub fn secureDeinit(self: *Posix) error{InputPending}!void {
         const state = self.inputState();
         if (state.buffered_work or state.pending != .none) return error.InputPending;
@@ -388,8 +386,7 @@ pub const Posix = struct {
         return self.timer_count;
     }
 
-    /// Owner-thread snapshot, not a kernel-queue check or proof of a fresh keypress.
-    /// Example: `const locally_idle = !state.buffered_work and state.pending == .none;`
+    /// Owner-thread snapshot of buffered work and incomplete input framing.
     pub fn inputState(self: *const Posix) InputState {
         return .{
             .buffered_work = self.input_cancel_pending or self.input_start != self.input_end or self.parser.hasQueuedEvent() or
@@ -442,14 +439,6 @@ pub const Posix = struct {
         if (self.options.signals) |signals| {
             if (signals.owner_thread != std.Thread.getCurrentId()) return error.WrongThread;
         }
-        for (sources) |source| {
-            if (!source.file.flags.nonblocking) return error.BlockingPollSource;
-            const source_nonblocking = descriptorIsNonblocking(source.file.handle) catch |err| switch (err) {
-                error.InvalidDescriptor => return error.InvalidPollSource,
-                else => return err,
-            };
-            if (!source_nonblocking) return error.BlockingPollSource;
-        }
     }
 
     fn pollTurn(
@@ -477,7 +466,7 @@ pub const Posix = struct {
             }
         }
 
-        const required = try requiredPollSlots(sources.len);
+        const required = sources.len + 3;
         poll_storage[0] = .{
             .fd = if (self.input_lifecycle == .reading) self.input_file.handle else -1,
             .events = std.posix.POLL.IN,
@@ -603,7 +592,7 @@ pub const Posix = struct {
     }
 
     fn takeDueTimer(self: *Posix, now_ns: i96) ?Event {
-        if (self.timer_count == 0 or !timerDue(self.timers[0], now_ns)) return null;
+        if (self.timer_count == 0 or self.timers[0].deadline.raw.nanoseconds > now_ns) return null;
         const timer = self.timers[0];
         self.removeTimer(0);
         return .{ .timer = .{ .id = timer.id, .deadline = timer.deadline } };
@@ -621,14 +610,12 @@ pub const Posix = struct {
             const progress = try self.consumeInput(remaining);
             if (progress.event) |event| return event;
             if (progress.bytes_consumed == 0) return null;
-            std.debug.assert(progress.bytes_consumed <= remaining);
             remaining -= progress.bytes_consumed;
         }
         return null;
     }
 
     fn consumeInput(self: *Posix, byte_budget: usize) !InputProgress {
-        std.debug.assert(byte_budget != 0);
         if (self.parser.hasQueuedEvent()) {
             const result = self.parser.next("");
             return .{ .bytes_consumed = 0, .event = parserEvent(result) };
@@ -685,17 +672,19 @@ pub const Posix = struct {
             .escape => self.options.input_timeouts.escape,
             .sequence => self.options.input_timeouts.sequence,
         };
-        self.parser_deadline_ns = if (timeout) |duration| try addTime(now_ns, duration.nanoseconds) else null;
+        self.parser_deadline_ns = if (timeout) |duration|
+            std.math.add(i96, now_ns, duration.nanoseconds) catch return error.DeadlineOverflow
+        else
+            null;
     }
 
     fn consumeWake(self: *Posix) !void {
         var count: u64 = 0;
-        const bytes_read = readOnce(self.wake_read.handle, std.mem.asBytes(&count)) catch |err| switch (err) {
+        _ = readOnce(self.wake_read.handle, std.mem.asBytes(&count)) catch |err| switch (err) {
             error.WouldBlock => 0,
             error.InvalidDescriptor => return error.InvalidWakeDescriptor,
             else => return err,
         };
-        if (bytes_read != 0 and bytes_read != @sizeOf(u64)) return error.Unexpected;
 
         const reasons = self.shared_wake.reasons.swap(0, .acq_rel);
         self.wakeup_pending = self.wakeup_pending or reasons & wake_reason != 0;
@@ -777,7 +766,6 @@ fn pollOnce(fds: []std.posix.pollfd, timeout: i32) !usize {
 }
 
 fn readOnce(fd: std.posix.fd_t, buffer: []u8) !usize {
-    std.debug.assert(buffer.len > 0 and buffer.len <= 0x7fff_f000);
     const result = std.posix.system.read(fd, buffer.ptr, buffer.len);
     return switch (std.posix.errno(result)) {
         .SUCCESS => @intCast(result),
@@ -808,10 +796,6 @@ fn timerLess(lhs: TimerSlot, rhs: TimerSlot) bool {
     return lhs_ns < rhs_ns or (lhs_ns == rhs_ns and lhs.id < rhs.id);
 }
 
-fn timerDue(timer: TimerSlot, now_ns: i96) bool {
-    return timer.deadline.raw.nanoseconds <= now_ns;
-}
-
 fn earlier(current: ?i96, candidate: ?i96) ?i96 {
     const value = candidate orelse return current;
     return if (current) |existing| @min(existing, value) else value;
@@ -831,14 +815,6 @@ fn pollTimeout(
     var milliseconds = @divTrunc(remaining, std.time.ns_per_ms);
     if (@mod(remaining, std.time.ns_per_ms) != 0) milliseconds += 1;
     return @intCast(@min(milliseconds, std.math.maxInt(i32)));
-}
-
-fn validateDuration(duration: std.Io.Duration) !void {
-    if (duration.nanoseconds <= 0) return error.InvalidTimeout;
-}
-
-fn addTime(timestamp: i96, duration: i96) !i96 {
-    return std.math.add(i96, timestamp, duration) catch error.DeadlineOverflow;
 }
 
 fn createWakeFd() !std.posix.fd_t {

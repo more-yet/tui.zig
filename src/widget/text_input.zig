@@ -17,7 +17,7 @@ pub const TextInput = struct {
     display_mode: DisplayMode = .plain,
     role: theme.Role = .{},
     selection_role: theme.Role = .{ .normal = .{ .attributes = .{ .reverse = true } } },
-    /// Call `model.cancelPaste()` if disable/re-enable happens between widget operations.
+    /// Cancel staged paste when disabling or changing its input target.
     enabled: bool = true,
     focused: bool = false,
     /// Set false when using `caretPosition()` with `Renderer.setCursor()`.
@@ -31,19 +31,12 @@ pub const TextInput = struct {
     }
 
     pub fn handle(self: *TextInput, event: input.Event) Update {
-        if (!self.enabled) {
-            self.model.cancelPaste();
-            return .ignored;
-        }
-        if (event == .key and event.key.action != .release and event.key.code == .enter) return .handled;
+        if (!self.enabled) return .ignored;
         return self.mapResult(self.model.handle(event));
     }
 
     pub fn applyAction(self: *TextInput, action: editor.Action) Update {
-        if (!self.enabled) {
-            self.model.cancelPaste();
-            return .ignored;
-        }
+        if (!self.enabled) return .ignored;
         return self.mapResult(self.model.applyAction(action));
     }
 
@@ -54,9 +47,7 @@ pub const TextInput = struct {
     }
 
     pub fn draw(self: *TextInput, surface: *render.Surface) !void {
-        if (!self.enabled) self.model.cancelPaste();
         std.debug.assert(surface.size().height <= 1);
-        std.debug.assert(!self.model.multiline);
         switch (self.display_mode) {
             .plain => {
                 _ = self.model.setViewportSize(surface.size().width, surface.size().height);
@@ -81,9 +72,7 @@ pub const TextInput = struct {
     /// Use the same size as draw; query again after edits or resize.
     /// Returns null when hidden, regardless of `paint_caret`.
     pub fn caretPosition(self: *TextInput, size: render.Size) ?render.Point {
-        if (!self.enabled) self.model.cancelPaste();
         std.debug.assert(size.height <= 1);
-        std.debug.assert(!self.model.multiline);
         if (self.display_mode == .plain) {
             _ = self.model.setViewportSize(size.width, size.height);
             return self.textArea().caretPosition();
