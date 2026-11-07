@@ -55,6 +55,9 @@ jobs:
       - name: Run finite ReleaseSafe compositions
         run: zig build compositions -Doptimize=ReleaseSafe
 
+      - name: Compile the interactive example
+        run: zig build -Doptimize=ReleaseSafe
+
       - name: Verify generated Unicode data
         run: zig build unicode-check
 

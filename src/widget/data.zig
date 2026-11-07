@@ -9,21 +9,17 @@ const Update = @import("update.zig").Update;
 pub const ScrollState = struct {
     top: usize = 0,
     selected: ?usize = null,
-    last_visible_rows: ?u16 = null,
     item_height: u16 = 1,
     gap: u16 = 0,
 
     /// Change geometry through this method. Top and selection remain item indices.
     pub fn setItemGeometry(self: *ScrollState, item_height: u16, gap: u16) error{InvalidItemHeight}!void {
         if (item_height == 0) return error.InvalidItemHeight;
-        if (self.item_height == item_height and self.gap == gap) return;
         self.item_height = item_height;
         self.gap = gap;
-        self.last_visible_rows = null;
     }
 
     fn stride(self: *const ScrollState) u32 {
-        std.debug.assert(self.item_height != 0);
         return @as(u32, self.item_height) + self.gap;
     }
 
@@ -58,22 +54,15 @@ pub const ScrollState = struct {
         return if (previous.top != self.top or previous.selected != self.selected) update.merge(.redraw) else update;
     }
 
-    /// Call normalize() before drawing; this query does not move selection or scroll position.
+    /// Clamps the queried range without changing selection or scroll position.
     pub fn visibleRange(self: *const ScrollState, count: usize, visible_rows: u16) scroll.Range {
         const start = @min(self.top, count -| self.fittingItems(visible_rows));
         const shown = (@as(u32, visible_rows) + self.stride() - 1) / self.stride();
         return .{ .start = start, .end = start + @min(count - start, shown) };
     }
 
+    /// Clamp after data or geometry changes. Use `reveal()` separately to follow selection.
     pub fn normalize(self: *ScrollState, count: usize, visible_rows: u16) void {
-        const resized = self.last_visible_rows != visible_rows;
-        const selected = self.selected;
-        self.clamp(count, visible_rows);
-        self.last_visible_rows = visible_rows;
-        if (resized or selected != self.selected) _ = self.reveal(count, visible_rows);
-    }
-
-    fn clamp(self: *ScrollState, count: usize, visible_rows: u16) void {
         if (count == 0) {
             self.top = 0;
             self.selected = null;
@@ -89,8 +78,7 @@ pub const ScrollState = struct {
     pub fn reveal(self: *ScrollState, count: usize, visible_rows: u16) bool {
         const previous_top = self.top;
         const previous_selected = self.selected;
-        self.clamp(count, visible_rows);
-        self.last_visible_rows = visible_rows;
+        self.normalize(count, visible_rows);
         if (self.selected) |selected| {
             if (visible_rows != 0) {
                 const capacity = self.fittingItems(visible_rows);
@@ -158,19 +146,15 @@ pub fn List(comptime Provider: type) type {
         const Self = @This();
 
         pub fn handle(self: *Self, event: input.Event) Update {
+            if (!self.enabled) return .ignored;
             const count = self.provider.count();
-            if (!self.enabled) {
-                self.state.normalize(count, self.bounds.height);
-                return .ignored;
-            }
             return self.state.handle(event, count, self.bounds, 0);
         }
 
-        pub fn draw(self: *Self, surface: *render.Surface) !void {
+        pub fn draw(self: *const Self, surface: *render.Surface) !void {
             const size: render.Size = .{ .width = self.bounds.width, .height = self.bounds.height };
             std.debug.assert(std.meta.eql(size, surface.size()));
             const count = self.provider.count();
-            self.state.normalize(count, size.height);
             const visible = self.state.visibleRange(count, size.height);
             try surface.fill(render.Rect.fromSize(size), self.row_role.resolve(if (self.enabled) .normal else .disabled));
             for (visible.start..visible.end) |index| {
@@ -214,20 +198,16 @@ pub fn Table(comptime Provider: type) type {
         }
 
         pub fn handle(self: *Self, event: input.Event) Update {
+            if (!self.enabled) return .ignored;
             const count = self.provider.count();
-            if (!self.enabled) {
-                self.state.normalize(count, self.bounds.height -| 1);
-                return .ignored;
-            }
             return self.state.handle(event, count, self.bounds, 1);
         }
 
-        pub fn draw(self: *Self, surface: *render.Surface) !void {
+        pub fn draw(self: *const Self, surface: *render.Surface) !void {
             const size: render.Size = .{ .width = self.bounds.width, .height = self.bounds.height };
             std.debug.assert(std.meta.eql(size, surface.size()));
             const body = bodyRect(size);
             const count = self.provider.count();
-            self.state.normalize(count, body.height);
             const visible = self.state.visibleRange(count, body.height);
             if (size.height == 0) return;
 

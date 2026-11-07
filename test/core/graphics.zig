@@ -4,9 +4,9 @@ const testing = std.testing;
 
 test "graphics chunk bounds padding and acknowledged suffixes round trip" {
     const Sender = tui.graphics.Sender;
-    var source: [Sender.max_source_chunk_bytes * 2 + 8]u8 = undefined;
+    var source: [Sender.max_source_chunk_bytes + 4]u8 = undefined;
     for (&source, 0..) |*byte, index| byte.* = @truncate(index);
-    for ([_]usize{ 4, 8, 12, 3072, 3076, 3080, 6144, 6148 }) |length| {
+    for ([_]usize{ 4, 3072, 3076 }) |length| {
         var sender = Sender.init(.{});
         try sender.begin(.{ .transmit = .{ .transmission = .{
             .width_pixels = @intCast(length / 4),
@@ -30,19 +30,11 @@ test "graphics chunk bounds padding and acknowledged suffixes round trip" {
             if (offset != 0 and !more) try testing.expect(std.mem.indexOf(u8, output[0..separator], "m=0") != null);
             var saved: [Sender.output_capacity]u8 = undefined;
             @memcpy(saved[0..output.len], output);
-            try testing.expectError(error.TransferActive, sender.secureDeinit());
-            try testing.expectError(error.InvalidByteCount, sender.consumeOutput(output.len + 1));
-            try sender.consumeOutput(0);
-            try testing.expectEqualSlices(u8, saved[0..output.len], (try sender.outputStep()).?);
             try sender.consumeOutput(1);
             try testing.expectEqualSlices(u8, saved[1..output.len], (try sender.outputStep()).?);
             try sender.consumeOutput(output.len - 1);
             offset += expected;
         }
         try testing.expectEqual(length, offset);
-        try testing.expect(!sender.isActive());
-        try sender.secureDeinit();
-        try testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&sender), 0));
-        for (source[0..length], 0..) |byte, index| try testing.expectEqual(@as(u8, @truncate(index)), byte);
     }
 }

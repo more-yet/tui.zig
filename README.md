@@ -3,21 +3,39 @@
 [![CI](https://github.com/more-yet/tui.zig/actions/workflows/ci.yml/badge.svg)](https://github.com/more-yet/tui.zig/actions/workflows/ci.yml)
 
 Terminal UI primitives for **Zig 0.17.0**, **x86_64-linux-gnu**, and **Linux 5.9+**.
-Unicode data is version **17.0.0**. The public module has no package dependencies.
+Unicode data is version **17.0.0**. The library has no package dependencies.
 
-The library provides text layout, incremental rendering, input parsing, widgets,
-editing, terminal control, and subprocesses. Applications own storage, state,
-I/O scheduling, approval policy, and cleanup.
+Applications own storage, widget state, layout, and I/O scheduling. The library
+provides text layout, rendering, input parsing, editing, widgets, and terminal control.
 
-## Use the library
+## Run an application
 
-Add the package, then pin the chosen revision in `build.zig.zon`:
+```sh
+zig build interactive
+```
+
+[`examples/interactive.zig`](examples/interactive.zig) is a complete editor with
+nonblocking output, resize, signals, suspend/resume, undo, wrapping, and mouse
+selection. Ctrl-Q quits, Ctrl-G suspends, Ctrl-L repaints, and F2 toggles wrapping.
+The workspace groups the document, line numbers, live state, and editing/session
+commands. Wide terminals show storage, selection, undo history, viewport, and
+previous-frame work counts alongside the text. Narrow terminals keep the editor
+and compact status; `>` in the gutter marks wrapped continuations.
+Very wide terminals keep a bounded reading width instead of stretching text lines.
+Its caller-owned buffers hold 4096 text bytes and a grid up to 512 × 256 cells.
+`zig build` installs the executable as `zig-out/bin/tui-interactive`.
+
+The example routes events and schedules presentation directly. Reuse only the
+parts you need: `input.Parser` without the runtime, `Surface` without widgets,
+`Model.applyAction()` without default bindings, or geometry without navigation.
+
+## Add the library
 
 ```sh
 zig fetch --save=tui git+https://github.com/more-yet/tui.zig.git
 ```
 
-In your build:
+Pin the chosen revision in `build.zig.zon`, then import the module in your build:
 
 ```zig
 const tui_package = b.dependency("tui", .{
@@ -27,7 +45,7 @@ const tui_package = b.dependency("tui", .{
 exe.root_module.addImport("tui", tui_package.module("tui"));
 ```
 
-### Draw a text field
+## Draw and present
 
 ```zig
 const tui = @import("tui");
@@ -47,81 +65,124 @@ pub fn drawField() !void {
 }
 ```
 
-Drawing updates memory, not the terminal. Route focused input through
-`field.handle(event)`; inspect `field.takeFailure()` for rejected edits.
-Set `field.display_mode = .masked` to paint one mask per grapheme without
-submitting plaintext to the renderer. The model still stores plaintext.
+Drawing updates the renderer's grid. To send it to a terminal, call
+`renderer.beginPresentation(capabilities)` and drive `renderer.presentStep(work_budget)`
+with a budget of at least 2:
 
-For the native terminal cursor, set `paint_caret = false`, query
-`field.caretPosition(surface.size())`, translate with `surface.screenPoint()`,
-then call `renderer.setCursor()`. Hide the terminal cursor when either query
-returns null. Query again after edits or resize.
-
-### Present output
-
-Call `renderer.beginPresentation(capabilities)` once, then drive
-`renderer.presentStep(work_budget)`:
-
-| Result | Caller action |
+| Result | Next action |
 | --- | --- |
-| `.output` | Attempt a nonblocking write; acknowledge only accepted bytes with `consumePresentation(n)` |
-| `.yielded` | Run other work before the next presentation turn |
-| `.cleared` | Replay owned graphics if needed, then `invalidateOutputState()` |
-| `.complete` | The frame is finished; drawing may resume |
+| `.output` | Write the bytes, then acknowledge the accepted prefix with `consumePresentation(n)` |
+| `.yielded` | Run other work before continuing presentation |
+| `.cleared` | Replay any graphics, call `invalidateOutputState()`, and continue |
+| `.complete` | Draw the next frame when application state changes |
 
-Keep one output owner. Pending output stays stable until acknowledged. A partial
-command must be drained before aborting. On `WouldBlock`, wait for write readiness
-rather than spinning. Recreate surfaces and redraw after resize.
+Use one output owner and nonblocking writes. On `WouldBlock`, wait for write
+readiness. Drain a partially written command before aborting presentation. After
+resize, call `renderer.resize()`, recreate surfaces, and redraw.
 
-`terminal.Session` and `graphics.Sender` use the same pattern:
-`outputStep()` returns a suffix, `consumeOutput(n)` acknowledges its accepted
-prefix, and null means complete. [Graphics usage](GRAPHICS.md) covers uploads,
-resource ownership, and replay.
+For a native terminal caret, set the field's `paint_caret = false`, obtain
+`field.caretPosition(surface.size())`, translate it with `surface.screenPoint()`,
+and pass it to `renderer.setCursor()`. Set its `visible = false` when either query returns null.
 
-### Storage and editing
+## Editing and storage
 
-- Keep borrowed storage alive, fixed, and disjoint for the owner's lifetime.
-- `editor.FixedStorage(n)` reserves text, grapheme indexes, rows, and paste space.
-  A non-wrapped single-line model can use one `VisualRow` via `editor.Storage`.
-- `_ = try model.setSoftWrap(true)` requires `model.value().len + 1` row slots;
-  edits enforce this bound while wrapping is enabled.
-- Cursor offsets are UTF-8 bytes. Use `cursorPosition()` for logical display
-  coordinates and `visualCursorPosition()` for wrapped coordinates.
-- Recreate borrowed row iterators after edits or layout changes. Attached history
-  is exclusively borrowed until detached.
-- For dynamic renderer allocation, `RendererStorageRequirements.init()` returns
-  element counts for every slice. Allocate using `RendererStorage.DamageRow`,
-  `.GlyphEntry`, `.StyleEntry`, `Cell`, `usize`, and `u32` as declared by the
-  storage fields. Size for maximum width and height, not just their product.
+Route input to the focused field with `field.handle(event)`. Use
+`field.takeFailure()` to report rejected edits. For multiline editing, use
+`editor.Model.init()` and `widget.TextArea`; call `area.layout(size)` before drawing
+into a surface of that size.
 
-### Input and terminal lifecycle
+For custom bindings, translate keys to `editor.Action` and call
+`model.applyAction(action)` directly. Pass paste framing and malformed input to
+`model.handle(event)`. Report `EventResult.failure` at the application boundary.
+Cancel staged paste with `model.cancelPaste()` when disabling a field or changing
+its input target; widget drawing and caret queries leave paste state alone.
 
-- `terminal.queryGeometry(file)` returns `.cells` and optional `.pixels`. Runtime
-  resize events carry this geometry and are also remeasurement hints: unchanged
-  cell dimensions do not suppress a request. Multiple pending requests coalesce.
-  Use `.cells` for renderer layout; pixel dimensions are null when unavailable.
-  Set `runtime.Options.resize` directly to the borrowed `std.Io.File` to query.
-- Use nonblocking terminal input/output. `runtime.Posix` validates both file flags
-  and kernel `O_NONBLOCK` for input and caller poll sources.
-- Use `stepWithSources()` when idle; use `pollWithSources()` to interleave runnable
-  work. Allocate slots with `runtime.requiredPollSlots(sources.len)`.
-- `inputState()` reports local buffered work and incomplete framing, including
-  EOF work. It does not inspect the kernel queue or establish a fresh keypress.
-  A null poll result does not mean all input is drained.
-- Parser/runtime input slices are borrowed until the next operation. Use
-  `input.OwnedEvent` when retaining an event.
-- Paste has no idle timeout. Cancellation rejects once, then discards through the
-  terminator. Reset the parser only when abandoning the old byte stream.
-- Install `SignalSource` before workers. Leave the terminal session before
-  `suspendProcess()`; re-enter and invalidate the renderer after continuation.
-  Suspend/continue cancels incomplete input through `.input_failure`, preserving
-  paste framing. Pass the rejection to an active editor as `.malformed`.
-- Keep runtime at a fixed address while sharing notifiers. Publish shared state
-  before waking; join notifier users before deinitializing runtime.
-- Finish visual leave output and restore termios separately. Use
-  `Session.emergencyRestore()` for bounded last-resort restoration after failure.
+For mouse editing, translate screen cells through your field bounds and viewport:
 
-Select Kitty keyboard enhancements explicitly:
+```zig
+const position: tui.editor.Position = .{
+    .row = model.viewport.top_row + local_y,
+    .column = model.viewport.left_column + local_x,
+};
+const offset = model.offsetAtVisualPosition(position); // Grapheme-safe UTF-8 offset.
+_ = try model.setVisualCursor(position, extend_selection);
+```
+
+Hit-testing uses absolute visual rows. Both cells of a wide grapheme map to its
+start; columns past a row map to its end. Missing rows return null from the query
+and `InvalidBoundary` from the setter. The setter keeps the clicked side of a
+soft-wrap boundary. The application owns pointer capture, drag lifetime, focus,
+and whether to extend selection.
+
+- Keep borrowed storage fixed, disjoint, and alive for its owner.
+- `editor.FixedStorage(n)` reserves text, grapheme indexes, visual rows, and paste
+  space. Use `editor.Storage` with one `VisualRow` for a compact unwrapped single-line field.
+- Text is UTF-8. Multiline models store LF; wrapping accepts LF and CRLF. Expand
+  tabs before passing text to drawing or editing APIs. Graphemes may occupy up to
+  48 UTF-8 bytes.
+- Cursor and selection offsets are UTF-8 bytes. `cursorPosition()` returns logical
+  display coordinates; `visualCursorPosition()` returns wrapped coordinates.
+- Enable wrapping with `try model.setSoftWrap(true)`. Supply at least
+  `model.value().len + 1` visual-row slots while wrapping is enabled.
+- Attach undo storage with `model.setHistory(&history)`. Group edits with
+  `history.beginTransaction()` and `history.endTransaction()`. The model exclusively
+  borrows attached history until `setHistory(null)`.
+- Recreate borrowed row iterators after edits or layout changes. Editing rebuilds
+  indexes in linear time, so size models for fields and composers.
+- For dynamic renderer storage, `RendererStorageRequirements.init()` returns the
+  element counts for each storage slice. Size it for maximum width and height,
+  and allocate using the element types declared by `RendererStorage`.
+
+For passwords, set `field.display_mode = .masked` before drawing sensitive text.
+The field paints one mask per grapheme; the model still holds plaintext. After
+use, finish or cancel staged paste and call `model.secureDeinit()`. Erase separately
+owned histories with `secureClear()`, and other buffers with `tui.secureZero(bytes)`.
+
+## Input and the event loop
+
+`input.Parser.next(bytes)` returns a consumed byte count and an event, failure,
+or request for more input. Advance by that count. Parser and runtime payloads
+are borrowed until the next operation; copy retained events with `input.OwnedEvent`.
+At EOF, drain `parser.endInput()` through `.done`.
+
+`runtime.Posix` combines input, timers, signals, worker notifications, and caller
+poll sources. Open input with `O_NONBLOCK`. The runtime reports readiness for
+caller sources; the application performs their I/O.
+
+- Use `stepWithSources()` while idle and `pollWithSources()` between runnable work.
+  Allocate poll storage with `runtime.requiredPollSlots(sources.len)`.
+- Use `inputState()` to inspect local buffered work and incomplete input framing.
+  When it reports buffered work, continue servicing the runtime even after a null poll.
+- Set timers using awake-clock deadlines from `runtime.now()`.
+- Share `runtime.notifier()` with workers. Keep the runtime at a fixed address,
+  publish shared state before waking it, and join notifier users before `deinit()`.
+- Bracketed paste waits for its terminator. `cancelPending()` reports a failure
+  and discards the remaining paste through that terminator. Use `reset()` when
+  replacing the input stream.
+
+### Terminal lifecycle
+
+Create a `terminal.Session` from the terminal input file. Call `beginEnter()` to
+enter raw mode, then write each `outputStep()` suffix and acknowledge it with
+`consumeOutput(n)` until entry completes.
+
+Set `runtime.Options.resize` to the terminal file. Resize events carry `.cells`
+and optional `.pixels`; use `.cells` for layout. Requests coalesce, and unchanged
+cell dimensions can still accompany new pixel geometry.
+
+Install `SignalSource` before starting workers. For suspension, finish presentation,
+leave the session, restore termios, and call `suspendProcess()`. After continuation,
+re-enter the session and call `renderer.invalidateTerminal()`. Forward
+`.input_failure` to an active editor as `.malformed` to cancel its staged input.
+
+On exit, call `beginLeave()`, finish its output, and call `restoreTermios()` even
+if output fails. `emergencyRestore()` provides best-effort cleanup through a
+nonblocking output descriptor after an output failure.
+
+### Keyboard reporting
+
+After capability negotiation, enable Kitty keyboard reports through
+`SessionOptions.kitty_keyboard` or `session.beginKittyKeyboard()`:
 
 ```zig
 const keyboard: tui.terminal.KeyboardEnhancements = .{
@@ -132,148 +193,95 @@ const keyboard: tui.terminal.KeyboardEnhancements = .{
 };
 ```
 
-Set `SessionOptions.kitty_keyboard = keyboard` or call
-`session.beginKittyKeyboard(keyboard)` after negotiation. Null leaves/disables
-the session-owned stack frame. Reconfiguration pops that frame before pushing
-its replacement; drain output normally. Associated text requires all-key reporting.
-Enter/Tab/Backspace release events require event types and all-key reporting.
-Terminals without these reports cannot distinguish held-key repeats reliably.
+Drain session output after reconfiguration. Pass null to pop the session's keyboard
+frame. Associated text requires all-key reporting; releases for Enter, Tab, and
+Backspace require both event types and all-key reporting.
 
-`input.Key` keeps primary identity in `code`, alternates in `shifted_codepoint`
-and `base_layout_codepoint`, and generated UTF-8 in borrowed `text`. One report
-produces one event. Editors prefer associated text on press/repeat and ignore
-release text. Shortcuts remain matched against primary identity unless the caller
-explicitly chooses an alternate. Copy retained events with `OwnedEvent`.
+`input.Key.code` identifies the key, `shifted_codepoint` and `base_layout_codepoint`
+carry alternate identities, and `text` contains generated UTF-8. Editors insert
+associated text on press/repeat. Command bindings match the primary identity.
 
-### Sensitive storage
+## Compose widgets
 
-Use explicit erasure after all borrows end:
+Keep one scroll state per independently scrolled view. Draw with a widget's
+`draw()` method or use its geometry and navigation with your own `Surface` painting.
 
-- `Model.secureDeinit()` erases full text/index/row/paste capacities; finish or
-  cancel staged paste first. Separately owned history is not erased.
-- `History.secureClear()` and `InputHistory.secureClear()` erase full backing
-  capacities and remain reusable. They require exclusive access.
-- `Parser.secureDeinit()` refuses incomplete framing or queued outcomes.
-- `Posix.secureDeinit()` refuses local input work and incomplete framing. Join
-  notifier users first. It closes owned resources and erases its read buffer,
-  but not timers, SignalSource, or kernel-queued input.
-- `OwnedEvent.secureDeinit()` ends borrowed payload lifetimes and wipes the object.
-- `Sender.secureDeinit()` requires idle output and erases only the sender.
-
-Deinitialized objects must be initialized again before use. Erase other owned
-buffers with `tui.secureZero(bytes)`. These operations neither erase terminal
-history nor guarantee removal of external copies, registers, or swapped pages.
-
-### Child processes
-
-`subprocess.PtyProcess` owns one direct child's wait status and PTY master.
-Call `spawnBeforeThreads()` before starting workers. A failed spawn can still
-retain a child: check its state and finish cleanup.
-
-Use exact-child `poll()` or `wait()` through the owner. PTY EOF is independent of
-child exit and reaping. `killAndWait()` takes an absolute awake-clock deadline;
-on failure, retain ownership and retry cleanup before `deinit()`. Do not install
-an automatic-reaping signal disposition or use competing wildcard waits.
-
-## Widget pattern
-
-Keep state and layout in the application. Use a widget's default `draw()` or
-paint directly with `Surface`; neither choice requires replacing navigation.
-Keep one scroll state per independently scrolled view.
-
-- **Geometry:** `Scrollbar.geometry(height)`, `Gauge.filledWidth(width)`,
-  `Panel.contentRect(size)`, and `Table(Provider).bodyRect(size)` return cell
-  geometry without drawing. Geometry is local to the supplied size.
-- **Columns:** `ColumnLayout.init(columns, width)` iterates clipped `{ index, x,
-  width }` placements. Zero-width columns are skipped; indices still refer to
-  the original column slice. Use the same placements for headers, cells, and
-  column hit-testing.
-- **Selection:** `ScrollState.handle(event, count, bounds, header_rows)` provides
-  keyboard, wheel, and row-click navigation without constructing a List or Table.
-  Pass 0 header rows for lists and 1 for tables. Before custom drawing, call
-  `normalize(count, body_height)`, then iterate `visibleRange(count, body_height)`.
-- **Item geometry:** `try state.setItemGeometry(2, 1)` selects two-row items with
-  one-row gaps. Top and selection remain item indices. `itemRect()` and `itemAt()`
-  use body-local coordinates; gaps are not clickable. Default drawing wraps taller
-  items and includes partially visible items. Navigation reveals a fully fitting
-  selection, or top-aligns an item taller than the viewport. Keep scrollbar metrics
-  in consistent units rather than mixing item indices and physical rows.
-- **Logs:** `scroll.Viewport` provides scrolling, tail-following, and
-  `visibleRange()`. It remains separate from selectable-row state.
-- **Layout:** List, Table, and Scrollback use their declared `bounds` for layout
-  and input. Update those bounds during application layout and draw into a surface
-  of exactly that size, as TextArea requires after `layout(size)`. Drawing does
-  not infer a new layout from the surface. Mouse events must use the bounds'
-  coordinate space; route keyboard events only to the intended view.
-
-For example, change a gauge's appearance without repeating its calculation:
-
-```zig
-const width = surface.size().width;
-const filled = gauge.filledWidth(width);
-try surface.fillAscii(.{ .x = 0, .y = 0, .width = width, .height = 1 }, '.', .{});
-try surface.fillAscii(.{ .x = 0, .y = 0, .width = filled, .height = 1 }, '=', .{});
-```
-
-Default List/Table providers supply plain text. For per-cell styles or mixed
-content, draw directly using the same state, visible range, and column layout.
-No renderer callbacks or alternate state objects are needed.
-
-For borrowed read-only text, use `Paragraph.rowCount(width)` and set
-`Paragraph.first_row` before drawing. Both surface wrapping methods accept
-`.{ .first_row = top, .alignment = .left }`. Public wrapping iterators also provide
-`skipRows(n)` and `countRemaining()`; counting leaves the iterator unchanged.
-They use the same wrapping engine, validate all input, and traverse skipped prefixes
-without allocating an index. An offset beyond the content clears the viewport.
-
-`focus.Registry` borrows a caller-owned `[]focus.Target` for registration and
-hit-testing. `focus.Manager` selects the active ID. Dispatch events directly to
-that target and use `widget.Update` to decide when to lay out and redraw.
-The application owns scheduling; finish active presentation before drawing.
-
-## Modules
-
-| Namespace | Provides |
+| Task | API |
 | --- | --- |
-| `text` | Graphemes, widths, word/line breaks, wrapping |
-| `render` | Grids, clipped surfaces, styles, cursors, Braille canvas |
-| `graphics` | Kitty commands, sender, replies, placeholders |
-| `input`, `runtime`, `terminal` | Parsing, polling, timers, signals, sessions, capabilities |
-| `editor` | Single/multiline models, selection, actions, history |
-| `widget`, `layout`, `scroll` | Controls, lists, tables, scrollback, geometry, row storage |
-| `focus`, `command`, `overlay`, `theme` | Focus navigation, hit-testing, bindings, layers, styles |
-| `subprocess` | PTY processes and child lifecycle |
+| Panel contents | `Panel.contentRect(size)` |
+| Custom progress bar | `Gauge.filledWidth(width)` |
+| Scrollbar thumb | `Scrollbar.geometry(height)` |
+| Table body | `Table(Provider).bodyRect(size)` |
+| Shared column placement | `ColumnLayout.init(columns, width)` |
+| Selectable rows | `ScrollState.handle()`, `normalize()`, `visibleRange()` |
+| Multirow items | `ScrollState.setItemGeometry(height, gap)`, `itemRect()`, `itemAt()` |
+| Logs and tail-following | `scroll.Viewport`, `scroll.LineRing`, `widget.Scrollback` |
+| Read-only paragraphs | `Paragraph.rowCount(width)`, `Paragraph.first_row` |
 
-Finite usage recipes live in `examples/composition/`:
+List, Table, and Scrollback use their declared `bounds` for layout and input. Draw
+into a surface of that size and route mouse coordinates in the bounds' coordinate
+space. Pass 0 header rows to `ScrollState.handle()` for lists and 1 for tables.
+After data or geometry changes, call `normalize(count, body_height)` to clamp
+state, or `reveal(count, body_height)` when you want to keep selection visible.
+List, Table, and Scrollback drawing leaves navigation state unchanged. Their
+`handle()` methods supply optional default navigation; use `scroll.Viewport` or
+your own offsets for other policies. Item selection and scroll positions are item
+indices; scrollbar metrics should use consistent units.
 
-```sh
-zig build compositions
-```
+Default List/Table providers supply plain text. For styled cells, use the same
+visible range and column placements with `Surface.putStyledLine()` or
+`putWrappedStyledText()`. Wrapping methods accept `first_row` and `alignment`;
+skipping rows traverses the prefix without building an index.
 
-## Verification
+Register targets in `focus.Registry`, select the active ID with `focus.Manager`,
+and dispatch events to that target. Use `widget.Update` to schedule layout and redraw.
+`command` supplies key bindings, `overlay` supplies stacking and hit-testing, and
+`theme` supplies styles for widget states.
 
-All maintained tests live in this repository under `test/`:
+Composition examples are in `examples/composition/`. Run them with
+`zig build compositions`. See [GRAPHICS.md](GRAPHICS.md) for Kitty image uploads
+and placement.
 
-- `core/`: input, Unicode, editing, rendering, and widget interactions.
-- `system/`: isolated process, descriptor, signal, and suspend/resume tests.
-- `terminal/`: output interpreted by a pinned terminal engine, plus private-PTY
-  restoration. Enabled only with `-Dterminal-tests=true`.
+## Child processes
+
+`subprocess.PtyProcess` owns a child and its PTY master. Call `spawnBeforeThreads()`
+before starting workers. Spawning and `wait()` block; use `poll()` in the UI loop.
+PTY EOF and child exit are separate events.
+
+Reap through the process owner. After a failed spawn, inspect `state()` and clean
+up a retained child. `killAndWait()` uses an absolute awake-clock deadline; retain
+ownership and retry cleanup on failure. Call `deinit()` after reaping. Keep the
+SIGCHLD disposition and child waits under the application's control.
+
+## Build and test
 
 ```sh
 zig fmt --check build.zig build.zig.zon bench examples src tools test
-zig build test -Dterminal-tests=true -Doptimize=Debug --test-timeout 60s -j2
+zig build test
 zig build test -Dterminal-tests=true -Doptimize=ReleaseSafe --test-timeout 60s -j2
 zig build compositions -Doptimize=ReleaseSafe
-zig build unicode-check
-zig build bench -- text_input 1000
-zig build bench -- graphics_transfer 1000
+zig build -Doptimize=ReleaseSafe
 ```
 
-`test-unit`, `test-system`, and `test-terminal` select individual suites.
-Process tests require devpts, pidfds, signalfd, and permission to install seccomp
-filters. They do not use the host's interactive terminal.
-See [terminal tests](test/terminal/README.md) and [benchmarks](bench/README.md).
+`test-unit`, `test-system`, and `test-terminal` select individual suites. Terminal
+tests use a pinned Ghostty engine and private PTYs. Process tests use Linux
+devpts, pidfds, signalfd, and seccomp.
 
-Generated Unicode tables come from `tools/unicode/`; regenerate with
-`zig build unicode-update`. License notices are in `LICENSE` and `LICENSES/`.
-Report security issues using [SECURITY.md](SECURITY.md).
+Regenerate Unicode tables from `tools/unicode/` with `zig build unicode-update`;
+use `zig build unicode-check` to compare them with the checked-in tables.
+
+### Benchmarks
+
+```sh
+zig build bench -- text_input 10000
+zig build bench -- nonblocking_pipe 1000
+zig build bench -- 1000
+```
+
+The last command runs every scenario. Each emits JSON with median batch-average
+picoseconds per operation, output bytes, and work counts. `ps_batch_max` is the
+slowest batch average; individual maxima are reported separately where measured.
+Compare runs on the same machine with the same scenario and iteration count.
+
+License notices are in `LICENSE` and `LICENSES/`. Report security issues through
+[GitHub private vulnerability reporting](https://github.com/more-yet/tui.zig/security/advisories/new).

@@ -82,7 +82,7 @@ pub const CursorPosition = struct {
 };
 
 pub const TerminalReply = struct {
-    kind: enum { csi, osc, apc },
+    kind: enum { csi, osc, apc, dcs, pm, sos },
     final: u8,
     raw: []const u8,
 };
@@ -148,7 +148,7 @@ pub fn OwnedEvent(comptime max_payload_bytes: usize) type {
             return result;
         }
 
-        /// Expires all borrowed payloads. Reinitialize before reuse.
+        /// Release event borrows before erasing the owned event.
         pub fn secureDeinit(self: *Self) void {
             memory.secureZero(std.mem.asBytes(self));
         }

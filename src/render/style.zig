@@ -11,7 +11,7 @@ pub const Color = union(enum(u8)) {
     default,
     indexed: u8,
     rgb: Rgb,
-    /// Image IDs are exact colors; do not substitute an ordinary RGB style.
+    /// Preserves exact RGB values for image and placement IDs.
     protocol_rgb: Rgb,
 };
 

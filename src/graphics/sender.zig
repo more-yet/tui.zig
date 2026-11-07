@@ -61,8 +61,7 @@ pub const Sender = struct {
         return self.state != .idle;
     }
 
-    /// Finish all output and end borrows first. Erases this sender only, not source
-    /// bytes or terminal images. Reinitialize before reuse.
+    /// Finish output and release borrows before erasing sender storage.
     pub fn secureDeinit(self: *Sender) error{TransferActive}!void {
         if (self.isActive()) return error.TransferActive;
         memory.secureZero(std.mem.asBytes(self));

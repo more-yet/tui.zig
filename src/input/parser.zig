@@ -4,7 +4,7 @@ const memory = @import("../core/memory.zig");
 
 const paste_end = "\x1b[201~";
 
-/// Paste delimiters are framing, not authentication of clipboard contents.
+/// Streaming terminal input parser with borrowed event payloads.
 pub const Parser = struct {
     pub const max_text_bytes = 4;
     pub const max_terminal_reply_bytes = 1_024;
@@ -53,7 +53,7 @@ pub const Parser = struct {
     };
 
     state: State = .ground,
-    string_kind: enum { osc, apc } = .osc,
+    string_kind: enum { osc, apc, dcs, pm, sos } = .osc,
     sequence: [max_terminal_reply_bytes]u8 = undefined,
     sequence_len: usize = 0,
     utf8: [max_text_bytes]u8 = undefined,
@@ -137,8 +137,7 @@ pub const Parser = struct {
         self.pending_len = 0;
     }
 
-    /// End event borrows first. Drain framing and queued outcomes before disposal;
-    /// this is not a cancellation operation. Reinitialize before reuse.
+    /// Drain framing and queued outcomes and release event borrows before erasing storage.
     pub fn secureDeinit(self: *Parser) error{PendingInput}!void {
         if (self.pending() != .none or self.hasQueuedEvent()) return error.PendingInput;
         memory.secureZero(std.mem.asBytes(self));
@@ -186,7 +185,6 @@ pub const Parser = struct {
     }
 
     fn preparePending(self: *Parser) void {
-        std.debug.assert(self.pending_index == self.pending_len);
         self.pending_index = 0;
         self.pending_len = 0;
     }
@@ -203,7 +201,7 @@ pub const Parser = struct {
 
     fn consume(self: *Parser, byte: u8) void {
         switch (self.state) {
-            .ground => self.consumeGround(byte),
+            .ground => self.consumeGround(byte, false),
             .escape => self.consumeEscape(byte),
             .csi => self.consumeCsi(byte),
             .discard_csi => {
@@ -243,43 +241,46 @@ pub const Parser = struct {
         }
     }
 
-    fn consumeGround(self: *Parser, byte: u8) void {
+    fn consumeGround(self: *Parser, byte: u8, alt: bool) void {
         switch (byte) {
             0x1B => {
                 self.state = .escape;
                 return;
             },
             0x0A, 0x0D => {
-                self.emit(.{ .key = .{ .code = .enter } });
+                self.emit(.{ .key = .{ .code = .enter, .modifiers = .{ .alt = alt } } });
                 return;
             },
             0x09 => {
-                self.emit(.{ .key = .{ .code = .tab } });
+                self.emit(.{ .key = .{ .code = .tab, .modifiers = .{ .alt = alt } } });
                 return;
             },
             0x08, 0x7F => {
-                self.emit(.{ .key = .{ .code = .backspace } });
+                self.emit(.{ .key = .{ .code = .backspace, .modifiers = .{ .alt = alt } } });
                 return;
             },
             0x00 => {
                 self.emit(.{ .key = .{
                     .code = .{ .codepoint = ' ' },
-                    .modifiers = .{ .control = true },
+                    .modifiers = .{ .control = true, .alt = alt },
                 } });
                 return;
             },
             else => {},
         }
-        if (byte >= 0x01 and byte <= 0x1A) {
+        if (byte >= 0x01 and byte <= 0x1F) {
             self.emit(.{ .key = .{
-                .code = .{ .codepoint = @as(u21, 'a') + byte - 1 },
-                .modifiers = .{ .control = true },
+                .code = .{ .codepoint = if (byte <= 0x1A) @as(u21, 'a') + byte - 1 else @as(u21, '@') + byte },
+                .modifiers = .{ .control = true, .alt = alt },
             } });
         } else if (byte >= 0x20 and byte <= 0x7E) {
-            const text = [1]u8{byte};
-            self.emit(.{ .text = &text });
+            if (alt) {
+                self.emit(.{ .key = .{ .code = .{ .codepoint = byte }, .modifiers = .{ .alt = true } } });
+            } else {
+                self.emit(.{ .text = &[1]u8{byte} });
+            }
         } else {
-            self.startUtf8(byte, false);
+            self.startUtf8(byte, alt);
         }
     }
 
@@ -294,9 +295,16 @@ pub const Parser = struct {
                 self.state = .ss3;
                 return;
             },
-            ']', '_' => {
+            ']', '_', 'P', '^', 'X' => {
                 self.state = .control_string;
-                self.string_kind = if (byte == ']') .osc else .apc;
+                self.string_kind = switch (byte) {
+                    ']' => .osc,
+                    '_' => .apc,
+                    'P' => .dcs,
+                    '^' => .pm,
+                    'X' => .sos,
+                    else => unreachable,
+                };
                 self.sequence_len = 0;
                 return;
             },
@@ -307,15 +315,8 @@ pub const Parser = struct {
             },
             else => {},
         }
-        if (byte >= 0x20 and byte <= 0x7E) {
-            self.state = .ground;
-            self.emit(.{ .key = .{
-                .code = .{ .codepoint = byte },
-                .modifiers = .{ .alt = true },
-            } });
-        } else {
-            self.startUtf8(byte, true);
-        }
+        self.state = .ground;
+        self.consumeGround(byte, true);
     }
 
     fn consumeCsi(self: *Parser, byte: u8) void {
@@ -414,6 +415,9 @@ pub const Parser = struct {
             .kind = switch (self.string_kind) {
                 .osc => .osc,
                 .apc => .apc,
+                .dcs => .dcs,
+                .pm => .pm,
+                .sos => .sos,
             },
             .final = final,
             .raw = bytes,
@@ -483,7 +487,7 @@ pub const Parser = struct {
             self.state = .ground;
             self.utf8_len = 0;
             self.emit(.malformed);
-            self.consumeGround(byte);
+            self.consumeGround(byte, false);
             return;
         }
 
@@ -694,10 +698,10 @@ pub const Parser = struct {
 
     fn kittyKeyCode(codepoint: u21) event.KeyCode {
         return switch (codepoint) {
-            27, 0xE000 => .escape,
-            13, 0xE001 => .enter,
-            9, 0xE002 => .tab,
-            127, 0xE003 => .backspace,
+            27 => .escape,
+            13 => .enter,
+            9 => .tab,
+            127 => .backspace,
             0xE004 => .insert,
             0xE005 => .delete,
             0xE006 => .left,
@@ -708,7 +712,8 @@ pub const Parser = struct {
             0xE00B => .page_down,
             0xE00C => .home,
             0xE00D => .end,
-            0xE00E...0xF8FF => .{ .functional = codepoint },
+            0xE014...0xE036 => .{ .function = @intCast(codepoint - 0xE014 + 1) },
+            0xE000...0xE003, 0xE00E...0xE013, 0xE037...0xF8FF => .{ .functional = codepoint },
             else => .{ .codepoint = codepoint },
         };
     }

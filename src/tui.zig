@@ -1,5 +1,4 @@
 //! Terminal UI primitives with caller-owned storage and I/O.
-//! Start with `editor.Model`, `widget.TextInput`, and `render.Renderer`.
 
 pub const text = @import("text.zig");
 pub const secureZero = @import("core/memory.zig").secureZero;

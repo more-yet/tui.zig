@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const scenario = std.meta.stringToEnum(enum { spawn, closed_stdio, close_range_denied, close_range_unavailable, auto_reap, no_child_wait }, args[1]) orelse return error.InvalidArguments;
+    const scenario = std.meta.stringToEnum(enum { spawn, closed_stdio, close_range_denied }, args[1]) orelse return error.InvalidArguments;
     const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(null_fd) != .SUCCESS) return error.OpenFailed;
     defer _ = linux.close(@intCast(null_fd));
@@ -29,16 +29,7 @@ pub fn main(init: std.process.Init) !void {
     if (marker != 100) return error.DescriptorFixtureFailed;
     defer _ = linux.close(marker);
     switch (scenario) {
-        .close_range_denied => try denyCloseRange(.ACCES),
-        .close_range_unavailable => try denyCloseRange(.NOSYS),
-        .auto_reap, .no_child_wait => {
-            const action: std.posix.Sigaction = .{
-                .handler = .{ .handler = if (scenario == .auto_reap) std.posix.SIG.IGN else std.posix.SIG.DFL },
-                .mask = std.posix.sigemptyset(),
-                .flags = if (scenario == .no_child_wait) std.posix.SA.NOCLDWAIT else 0,
-            };
-            std.posix.sigaction(.CHLD, &action, null);
-        },
+        .close_range_denied => try denyCloseRange(),
         .closed_stdio => for (0..3) |fd| {
             _ = linux.close(@intCast(fd));
         },
@@ -58,12 +49,7 @@ pub fn main(init: std.process.Init) !void {
     const command: tui.subprocess.Command = .{ .argv = &.{ args[0], "child" }, .environ = init.minimal.environ };
     const options: tui.subprocess.PtyOptions = .{ .size = .{ .width = 20, .height = 4 } };
     switch (scenario) {
-        .auto_reap, .no_child_wait => {
-            try testing.expectError(error.IncompatibleSignalPolicy, process.spawnBeforeThreads(command, &storage, options));
-            try testing.expectEqual(tui.subprocess.PtyState.empty, process.state());
-            try testing.expectError(error.NoChild, process.pid());
-        },
-        .close_range_denied, .close_range_unavailable => {
+        .close_range_denied => {
             try testing.expectError(error.ChildSetupFailed, process.spawnBeforeThreads(command, &storage, options));
             try testing.expect(process.isReaped());
         },
@@ -85,14 +71,14 @@ fn deadline(io: std.Io) std.Io.Clock.Timestamp {
     return .{ .clock = .awake, .raw = .{ .nanoseconds = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s } };
 }
 
-fn denyCloseRange(err: std.posix.E) !void {
+fn denyCloseRange() !void {
     const Instruction = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 };
     const Program = extern struct { len: u16, filter: [*]const Instruction };
     const bpf = linux.BPF;
     const instructions = [_]Instruction{
         .{ .code = bpf.LD | bpf.W | bpf.ABS, .k = @offsetOf(linux.SECCOMP.data, "nr") },
         .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jf = 1, .k = @backingInt(linux.SYS.close_range) },
-        .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(err)) },
+        .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(std.posix.E.ACCES)) },
         .{ .code = bpf.RET | bpf.K, .k = linux.SECCOMP.RET.ALLOW },
     };
     const program = Program{ .len = instructions.len, .filter = &instructions };

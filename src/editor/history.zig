@@ -50,8 +50,7 @@ pub const History = struct {
 
     pub fn storageOverlaps(self: *const History, storage: []const u8) bool {
         const record_bytes = std.mem.sliceAsBytes(self.records);
-        return memory.slicesOverlap(record_bytes, self.bytes) or
-            memory.slicesOverlap(record_bytes, storage) or
+        return memory.slicesOverlap(record_bytes, storage) or
             memory.slicesOverlap(self.bytes, storage);
     }
 
@@ -81,7 +80,6 @@ pub const History = struct {
 
     pub fn beginTransaction(self: *History) void {
         if (self.transaction_depth == 0) self.active_transaction = self.takeTransaction();
-        std.debug.assert(self.transaction_depth != std.math.maxInt(usize));
         self.transaction_depth += 1;
     }
 
@@ -156,7 +154,6 @@ pub const History = struct {
     }
 
     pub fn commitUndo(self: *History) void {
-        std.debug.assert(self.canUndo());
         self.cursor -= 1;
     }
 
@@ -220,7 +217,6 @@ pub const History = struct {
             }
         }
 
-        std.debug.assert(remove_count != 0);
         std.mem.copyForwards(u8, self.bytes[0 .. self.byte_len - removed_bytes], self.bytes[removed_bytes..self.byte_len]);
         std.mem.copyForwards(Record, self.records[0 .. self.len - remove_count], self.records[remove_count..self.len]);
         self.len -= remove_count;

@@ -16,7 +16,7 @@ const Provider = struct {
     }
 };
 
-test "list and table reveal on resize but preserve wheel scrolling until navigation" {
+test "list and table leave reveal policy to the caller and preserve wheel scrolling until navigation" {
     inline for (.{ false, true }) |table| {
         var provider: Provider = .{};
         var state: tui.widget.ScrollState = .{ .selected = 9 };
@@ -35,6 +35,9 @@ test "list and table reveal on resize but preserve wheel scrolling until navigat
         try renderer.resize(.{ .width = 8, .height = 5 + header });
         view.bounds = tui.render.Rect.fromSize(renderer.size());
         surface = renderer.surface(view.bounds);
+        try view.draw(&surface);
+        try testing.expectEqual(@as(usize, 0), state.top);
+        _ = state.reveal(provider.count(), 5);
         try view.draw(&surface);
         try testing.expectEqual(@as(usize, 5), state.top);
         try testing.expectEqual(@as(?usize, 9), state.selected);
@@ -104,6 +107,7 @@ test "uniform multirow items share drawing hit testing paging and selection visi
         state.selected = 5;
         view.bounds.height = 4 + header;
         surface = renderer.surface(view.bounds);
+        _ = state.reveal(provider.count(), 4);
         try view.draw(&surface);
         try testing.expectEqual(@as(usize, 5), state.top);
         state.top = 0;
@@ -113,6 +117,7 @@ test "uniform multirow items share drawing hit testing paging and selection visi
         try testing.expectEqual(@as(u16, 1), state.itemRect(provider.count(), .{ .width = 6, .height = 4 }, 1).?.height);
         provider.len = 1;
         state.selected = 5;
+        state.normalize(provider.count(), 4);
         try view.draw(&surface);
         try testing.expectEqual(@as(?usize, 0), state.selected);
         try state.setItemGeometry(8, 0);

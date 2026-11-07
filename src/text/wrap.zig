@@ -57,8 +57,7 @@ const Bytes = struct {
         return 1;
     }
 
-    inline fn segment(self: Bytes, index: usize) []const u8 {
-        std.debug.assert(index == 0);
+    inline fn segment(self: Bytes, _: usize) []const u8 {
         return self.input;
     }
 

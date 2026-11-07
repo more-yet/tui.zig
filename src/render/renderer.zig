@@ -297,7 +297,6 @@ pub const Renderer = struct {
         self.terminal_cursor_state.invalidate();
     }
 
-    /// Example: `try renderer.setCursor(.{ .position = .{ .x = 0, .y = 0 } });`
     /// Out-of-bounds positions stay hidden until they fit after resize.
     pub fn setCursor(self: *Renderer, cursor: cursor_module.Cursor) !void {
         try self.requireInactive();
@@ -367,8 +366,7 @@ pub const Renderer = struct {
         };
     }
 
-    /// Call once per work turn, e.g. `try renderer.presentStep(256)`.
-    /// Write `.output` bytes and acknowledge only the accepted prefix; no I/O occurs here.
+    /// Generates output within the work budget. Acknowledge writes with `consumePresentation()`.
     pub fn presentStep(self: *Renderer, work_budget: u32) !Presentation {
         if (work_budget < 2) return error.InvalidWorkBudget;
         if (self.pending_command) |pending| return .{
@@ -799,15 +797,6 @@ pub const Renderer = struct {
         }
     }
 
-    fn fillFullRows(self: *Renderer, start_y: u16, end_y: u16, style_id: style_module.Id) void {
-        self.fillCellRect(.{
-            .x = 0,
-            .y = start_y,
-            .width = self.terminal_size.width,
-            .height = end_y - start_y,
-        }, .{ .style = style_id });
-    }
-
     fn fillCellRect(self: *Renderer, rect: geometry.Rect, target: cell_module.Cell) void {
         if (self.last_uniform_fill) |proof| {
             if (rectEql(proof.rect, rect)) {
@@ -915,7 +904,6 @@ pub const Renderer = struct {
         offset = text_offset;
         if (!range_start.eql(range_end)) {
             if (prefix_range) {
-                std.debug.assert(range_start.span == 0 and range_start.byte == 0);
                 for (spans[0..range_end.span]) |span| {
                     try self.replaceAsciiSpanSlice(
                         cells,
@@ -1177,7 +1165,6 @@ pub const Renderer = struct {
         bytes: []const u8,
         style_id: style_module.Id,
     ) ?damage_module.Span {
-        std.debug.assert(bytes.len <= std.math.maxInt(u16));
         var first_changed: ?u16 = null;
         var last_changed: u16 = 0;
         var style_retains: usize = 0;
@@ -1246,7 +1233,6 @@ inline fn putTextUntil(
     width_profile: grapheme.WidthProfile,
     end_x: u16,
 ) !u16 {
-    std.debug.assert(end_x <= renderer.terminal_size.width);
     if (origin.x >= end_x or origin.y >= renderer.terminal_size.height) return 0;
     if (text.len == 1 and text[0] >= 0x20 and text[0] <= 0x7E and style.eql(.{})) {
         renderer.setAscii(origin.x, origin.y, text[0], 0);
@@ -1328,7 +1314,6 @@ inline fn putTextPaddedUntil(
     width_profile: grapheme.WidthProfile,
     end_x: u16,
 ) !u16 {
-    std.debug.assert(end_x <= renderer.terminal_size.width);
     if (origin.x >= end_x or origin.y >= renderer.terminal_size.height) return 0;
     const available = @min(field_width, end_x - origin.x);
     if (printableAscii(text)) {
@@ -1366,35 +1351,16 @@ fn putUnicodeTextPadded(
         used += width;
         byte_end = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(text.ptr) + cluster.bytes.len;
     }
-    try fillRenderer(renderer, .{ .x = origin.x, .y = origin.y, .width = available, .height = 1 }, style);
+    try fillRenderer(renderer, .{ .x = origin.x, .y = origin.y, .width = available, .height = 1 }, ' ', style);
     _ = try putTextUntil(renderer, origin, text[0..byte_end], style, width_profile, end_x);
     return used;
 }
 
-fn fillRenderer(renderer: *Renderer, rect: geometry.Rect, style: style_module.Style) !void {
-    try renderer.requireInactive();
-    const clipped = rect.intersection(geometry.Rect.fromSize(renderer.terminal_size));
-    if (clipped.isEmpty()) return;
+fn fillRenderer(renderer: *Renderer, rect: geometry.Rect, glyph: u8, style: style_module.Style) !void {
+    if (rect.isEmpty()) return;
     const style_id = try renderer.styles.intern(style);
     defer renderer.styles.release(style_id);
-
-    const end_x: u16 = @intCast(clipped.right());
-    const end_y: u16 = @intCast(clipped.bottom());
-    if (clipped.x == 0 and end_x == renderer.terminal_size.width) {
-        renderer.fillFullRows(clipped.y, end_y, style_id);
-        return;
-    }
-    renderer.fillCellRect(clipped, .{ .style = style_id });
-}
-
-fn fillAsciiRenderer(renderer: *Renderer, rect: geometry.Rect, glyph: u8, style: style_module.Style) !void {
-    try renderer.requireInactive();
-    if (glyph < 0x20 or glyph > 0x7E) return error.InvalidAsciiGlyph;
-    const clipped = rect.intersection(geometry.Rect.fromSize(renderer.terminal_size));
-    if (clipped.isEmpty()) return;
-    const style_id = try renderer.styles.intern(style);
-    defer renderer.styles.release(style_id);
-    renderer.fillCellRect(clipped, .{ .glyph = glyph, .style = style_id });
+    renderer.fillCellRect(rect, .{ .glyph = glyph, .style = style_id });
 }
 
 pub const Surface = struct {
@@ -1656,7 +1622,7 @@ pub const Surface = struct {
         const truncated = total_width > available;
         const marker_width = line_layout.ellipsisWidth(width_profile);
         const append_ellipsis = truncated and options.overflow == .ellipsis and marker_width <= available;
-        const content_limit = if (append_ellipsis) available - marker_width else available;
+        const content_limit = if (truncated and options.overflow == .ellipsis) available -| marker_width else available;
         var prefix_width: u16 = 0;
         var full_spans: usize = 0;
         var partial_span: ?usize = null;
@@ -1930,7 +1896,7 @@ pub const Surface = struct {
             self.clip,
         );
         if (clipped.isEmpty()) return;
-        try fillRenderer(self.renderer, clipped, style);
+        try fillRenderer(self.renderer, clipped, ' ', style);
     }
 
     pub fn fillAscii(self: *Surface, rect: geometry.Rect, glyph: u8, style: style_module.Style) !void {
@@ -1945,7 +1911,7 @@ pub const Surface = struct {
             self.clip,
         );
         if (clipped.isEmpty()) return;
-        try fillAsciiRenderer(self.renderer, clipped, glyph, style);
+        try fillRenderer(self.renderer, clipped, glyph, style);
     }
 
     pub fn fillAsciiBatch(self: *Surface, fills: []const AsciiFill, style: style_module.Style) !void {

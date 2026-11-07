@@ -73,7 +73,6 @@ pub const Storage = struct {
     paste: []u8,
 };
 
-/// Example: `var storage: tui.editor.FixedStorage(256) = .{};`
 /// Use `Storage` with one `VisualRow` for compact non-wrapped single-line fields.
 pub fn FixedStorage(comptime text_capacity: usize) type {
     return struct {
@@ -180,7 +179,6 @@ pub const Model = struct {
     paste_state: PasteState = .idle,
     history: ?*History = null,
 
-    /// Example: `var model = try tui.editor.Model.init(storage.slices(), "hello");`
     pub fn init(storage: Storage, initial: []const u8) InitError!Model {
         return initMode(storage, initial, true);
     }
@@ -221,8 +219,8 @@ pub const Model = struct {
         return self.storage[0..self.len];
     }
 
-    /// Ends all model borrows and erases full storage capacities. Separately owned
-    /// history is not erased. Finish/cancel staged paste first; reinitialize to reuse.
+    /// Finish or cancel staged paste and release borrows before erasing model storage.
+    /// Clear separately owned history with `History.secureClear()`.
     pub fn secureDeinit(self: *Model) error{PasteActive}!void {
         if (self.paste_state != .idle) return error.PasteActive;
         memory.secureZero(self.storage);
@@ -233,18 +231,25 @@ pub const Model = struct {
     }
 
     fn rebuildBoundaries(self: *Model) void {
-        var iterator = grapheme.Iterator{ .input = self.value() };
+        const bytes = self.value();
+        var iterator = grapheme.Iterator{ .input = bytes };
         var count: usize = 0;
         var row: u32 = 0;
         var column: u32 = 0;
-        while (iterator.next()) |cluster| {
-            const offset = @intFromPtr(cluster.bytes.ptr) - @intFromPtr(self.value().ptr);
+        while (iterator.index < bytes.len) {
+            const offset = iterator.index;
             self.boundaries[count] = .{ .offset = @intCast(offset), .row = row, .column = column };
             count += 1;
-            if (std.mem.eql(u8, cluster.bytes, "\n")) {
+            if (bytes[offset] == '\n') {
+                iterator.index += 1;
                 row += 1;
                 column = 0;
+            } else if (bytes[offset] < 0x80 and (offset + 1 == bytes.len or bytes[offset + 1] < 0x80)) {
+                // An ASCII base followed by UTF-8 may belong to a combining cluster.
+                iterator.index += 1;
+                column += 1;
             } else {
+                const cluster = iterator.next().?;
                 const width = cluster.displayWidthAssumeValid(self.width_profile) catch unreachable;
                 column += width;
             }
@@ -371,24 +376,11 @@ pub const Model = struct {
     fn boundaryForColumn(self: *const Model, start: usize, end: usize, target_column: usize) usize {
         const start_index = self.boundaryIndex(start) orelse unreachable;
         const end_index = self.boundaryIndex(end) orelse unreachable;
-        const base_column = self.boundaries[start_index].column;
-        const target = std.math.add(u32, base_column, @intCast(@min(target_column, std.math.maxInt(u32)))) catch
-            std.math.maxInt(u32);
-        var low = start_index;
-        var high = end_index + 1;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            if (self.boundaries[middle].column <= target) {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        return low - 1;
+        const base_column: usize = self.boundaries[start_index].column;
+        return self.boundaryAtOrBeforeColumn(start_index, end_index, base_column +| target_column);
     }
 
     fn cursorGraphemeWidth(self: *const Model) usize {
-        std.debug.assert(self.cursor_boundary < self.boundary_count);
         if (self.cursor_boundary + 1 == self.boundary_count or self.value()[self.cursorOffset()] == '\n') return 0;
         return self.boundaries[self.cursor_boundary + 1].column - self.boundaries[self.cursor_boundary].column;
     }
@@ -430,12 +422,10 @@ pub const Model = struct {
 
     /// UTF-8 byte offset, not display column or grapheme index.
     pub fn cursorOffset(self: *const Model) usize {
-        std.debug.assert(self.cursor_boundary < self.boundary_count);
         return self.boundaries[self.cursor_boundary].offset;
     }
 
     pub fn cursorPosition(self: *const Model) Position {
-        std.debug.assert(self.cursor_boundary < self.boundary_count);
         const boundary = self.boundaries[self.cursor_boundary];
         return .{ .row = boundary.row, .column = boundary.column };
     }
@@ -464,7 +454,6 @@ pub const Model = struct {
         return !std.meta.eql(previous, self.viewport);
     }
 
-    /// Example: `_ = try model.setSoftWrap(true);`
     /// Requires `value().len + 1` row slots when enabled; failure leaves state unchanged.
     pub fn setSoftWrap(self: *Model, enabled: bool) error{IndexCapacityExceeded}!bool {
         if (self.soft_wrap == enabled) return false;
@@ -620,6 +609,22 @@ pub const Model = struct {
         return .{ .row = location.row, .column = location.column };
     }
 
+    /// Absolute visual row and cell column, before viewport translation.
+    /// Both cells of a wide grapheme map to its start; columns past the row map to its end.
+    pub fn offsetAtVisualPosition(self: *const Model, position: Position) ?usize {
+        if (position.row >= self.visual_row_count) return null;
+        const row = self.visual_row_storage[position.row];
+        return self.boundaries[self.boundaryForColumn(row.start, row.end, position.column)].offset;
+    }
+
+    /// Preserves the chosen side of a soft-wrap boundary. `extend` keeps the selection anchor.
+    pub fn setVisualCursor(self: *Model, position: Position, extend: bool) error{InvalidBoundary}!bool {
+        const offset = self.offsetAtVisualPosition(position) orelse return error.InvalidBoundary;
+        const row = self.visual_row_storage[position.row];
+        const affinity: CursorAffinity = if (offset == row.end and row.break_kind == .soft) .backward else .forward;
+        return self.moveToBoundary(self.boundaryIndex(offset).?, extend, false, affinity);
+    }
+
     pub fn setWidthProfile(self: *Model, profile: grapheme.WidthProfile) bool {
         if (self.width_profile == profile) return false;
         self.width_profile = profile;
@@ -686,7 +691,7 @@ pub const Model = struct {
         self.history = history;
     }
 
-    /// Call if disabling and re-enabling a widget without letting it observe the disabled state.
+    /// Discards staged editor text; the input parser still owns paste framing.
     pub fn cancelPaste(self: *Model) void {
         self.paste_state = .idle;
     }
@@ -700,29 +705,39 @@ pub const Model = struct {
     }
 
     pub fn undo(self: *Model) EditError!bool {
-        const history = self.history orelse return false;
-        const first = history.peekUndo() orelse return false;
-        const transaction = first.transaction;
-        while (history.peekUndo()) |edit| {
-            if (edit.transaction != transaction) break;
-            const end = std.math.add(usize, edit.start, edit.inserted.len) catch return error.InvalidBoundary;
-            _ = try self.replaceRangeInternal(edit.start, end, edit.removed, false);
-            _ = try self.setSelection(edit.before.anchor orelse edit.before.cursor, edit.before.cursor);
-            history.commitUndo();
-        }
-        return true;
+        return self.restoreHistory(true);
     }
 
     pub fn redo(self: *Model) EditError!bool {
+        return self.restoreHistory(false);
+    }
+
+    fn restoreHistory(self: *Model, comptime undoing: bool) EditError!bool {
         const history = self.history orelse return false;
-        const first = history.peekRedo() orelse return false;
-        const transaction = first.transaction;
-        while (history.peekRedo()) |edit| {
-            if (edit.transaction != transaction) break;
-            const end = std.math.add(usize, edit.start, edit.removed.len) catch return error.InvalidBoundary;
-            _ = try self.replaceRangeInternal(edit.start, end, edit.inserted, false);
-            _ = try self.setSelection(edit.after.anchor orelse edit.after.cursor, edit.after.cursor);
-            history.commitRedo();
+        const first = (if (undoing) history.peekUndo() else history.peekRedo()) orelse return false;
+        var cursor = history.cursor;
+        var len = self.len;
+        // Wrapping can be enabled after recording edits that need more row storage.
+        while (if (undoing) cursor != 0 else cursor != history.len) {
+            const record = history.records[if (undoing) cursor - 1 else cursor];
+            if (record.transaction != first.transaction) break;
+            len -= if (undoing) record.inserted_len else record.removed_len;
+            const inserted = if (undoing) record.removed_len else record.inserted_len;
+            if (inserted > self.storage.len - len) return error.CapacityExceeded;
+            len += inserted;
+            if (self.boundaries.len < len + 1 or
+                self.visual_row_storage.len < (if (self.multiline or self.soft_wrap) len + 1 else @as(usize, 1)))
+                return error.CapacityExceeded;
+            if (undoing) cursor -= 1 else cursor += 1;
+        }
+        while (history.cursor != cursor) {
+            const edit = (if (undoing) history.peekUndo() else history.peekRedo()).?;
+            const removed = if (undoing) edit.inserted else edit.removed;
+            const inserted = if (undoing) edit.removed else edit.inserted;
+            _ = try self.replaceRangeInternal(edit.start, edit.start + removed.len, inserted, false);
+            const state = if (undoing) edit.before else edit.after;
+            _ = try self.setSelection(state.anchor orelse state.cursor, state.cursor);
+            if (undoing) history.commitUndo() else history.commitRedo();
         }
         return true;
     }
@@ -990,7 +1005,6 @@ pub const Model = struct {
         preserve_preferred: bool,
         affinity: CursorAffinity,
     ) bool {
-        std.debug.assert(target_boundary < self.boundary_count);
         if (target_boundary == self.cursor_boundary and affinity == self.cursor_affinity and (extend or self.anchor == null)) return false;
         const previous_cursor = self.cursorOffset();
         const previous_anchor = self.anchor;
@@ -1167,7 +1181,6 @@ const LineBounds = struct {
 };
 
 fn lineRangeAtOffset(value: []const u8, offset: usize) Selection {
-    std.debug.assert(offset <= value.len);
     const start = if (std.mem.lastIndexOfScalar(u8, value[0..offset], '\n')) |newline| newline + 1 else 0;
     const relative_end = std.mem.indexOfScalar(u8, value[offset..], '\n') orelse value.len - offset;
     return .{ .start = start, .end = offset + relative_end };
@@ -1175,12 +1188,6 @@ fn lineRangeAtOffset(value: []const u8, offset: usize) Selection {
 
 fn pageRows(visible_rows: u16) usize {
     return @max(@as(usize, 1), @as(usize, visible_rows) -| 1);
-}
-
-fn countNewlines(value: []const u8) usize {
-    var count: usize = 0;
-    for (value) |byte| count += @intFromBool(byte == '\n');
-    return count;
 }
 
 fn asciiEditIsSafe(value: []const u8, start: usize, end: usize, replacement: []const u8, multiline: bool) bool {

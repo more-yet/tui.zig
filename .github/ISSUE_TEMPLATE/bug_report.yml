@@ -47,10 +47,3 @@ body:
       label: Relevant logs
       description: Share the useful part and replace private data with clear placeholders.
       render: text
-  - type: checkboxes
-    id: confirmation
-    attributes:
-      label: Confirmation
-      options:
-        - label: This report is safe to publish and uses sample data.
-          required: true
